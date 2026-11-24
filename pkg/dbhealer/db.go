@@ -24,21 +24,22 @@ import (
 const DefaultMaxSessions = 50
 
 type Report struct {
-	Mount             string    `json:"mount"`
-	ReadOnly          bool      `json:"read_only"`
-	Healthy           bool      `json:"healthy"`
-	PlaylistEntities  int       `json:"playlist_entities_relinked"`
-	Playlists         int       `json:"playlists_relinked"`
-	Waveforms         int       `json:"waveforms_replaced"`
-	Loops             int       `json:"loops_aligned"`
-	Artwork           int       `json:"artwork_resized"`
-	OrphanArtwork     int       `json:"orphan_artwork_references"`
-	ReanalysisPending int       `json:"reanalysis_pending"`
-	PathsNormalized   int       `json:"paths_normalized"`
-	HistoryPruned     bool      `json:"history_pruned"`
-	ReserveFixed      []string  `json:"reserve_fixed,omitempty"`
-	Warnings          []string  `json:"warnings,omitempty"`
-	CheckedAt         time.Time `json:"checked_at"`
+	Mount                    string    `json:"mount"`
+	ReadOnly                 bool      `json:"read_only"`
+	Healthy                  bool      `json:"healthy"`
+	PlaylistEntities         int       `json:"playlist_entities_relinked"`
+	PlaylistEntityDuplicates int       `json:"playlist_entity_duplicates,omitempty"`
+	Playlists                int       `json:"playlists_relinked"`
+	Waveforms                int       `json:"waveforms_replaced"`
+	Loops                    int       `json:"loops_aligned"`
+	Artwork                  int       `json:"artwork_resized"`
+	OrphanArtwork            int       `json:"orphan_artwork_references"`
+	ReanalysisPending        int       `json:"reanalysis_pending"`
+	PathsNormalized          int       `json:"paths_normalized"`
+	HistoryPruned            bool      `json:"history_pruned"`
+	ReserveFixed             []string  `json:"reserve_fixed,omitempty"`
+	Warnings                 []string  `json:"warnings,omitempty"`
+	CheckedAt                time.Time `json:"checked_at"`
 }
 
 // Open never creates a missing library. A single connection keeps connection-local
@@ -165,10 +166,16 @@ func heal(db *sql.DB, dataOnly bool) (Report, error) {
 				return err
 			}
 		}
+		if r.PlaylistEntityDuplicates, err = healPlaylistEntityIntegrity(tx); err != nil {
+			return err
+		}
 		if r.PlaylistEntities, err = healChains(tx, false); err != nil {
 			return err
 		}
 		if r.Playlists, err = healChains(tx, true); err != nil {
+			return err
+		}
+		if err = syncSqliteSequence(tx); err != nil {
 			return err
 		}
 		if !dataOnly {
@@ -328,6 +335,7 @@ func healMountContext(ctx context.Context, mount string, maxSessions int, dataOn
 			return r, ce
 		}
 		r.PlaylistEntities += hr.PlaylistEntities
+		r.PlaylistEntityDuplicates += hr.PlaylistEntityDuplicates
 		r.Playlists += hr.Playlists
 		r.Waveforms += hr.Waveforms
 		r.Loops += hr.Loops

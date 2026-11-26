@@ -131,6 +131,7 @@ def go_sources(mid):
 
 
 EXTRA_QML = {
+    "dmx-studio": {"MaestroPane.qml": "EngineXMods/dmx-studio/MaestroPane.qml"},
     "cpu-ram-monitor": {
         "TimeIndicator.qml": "Skins/Embedded/Views/StatusBar/Indicators/TimeIndicator.qml",
     },

@@ -44,6 +44,7 @@ type route struct {
 
 // Feature is the DMX console state; exported fields are for tests.
 type Feature struct {
+	maestro             *maestro
 	state               string
 	Config              map[string]any
 	FlashUntil          float64
@@ -81,6 +82,7 @@ func New(env modkit.Env) (modkit.Feature, error) {
 	f.looping = true
 	go f.loop()
 	go f.clockLoop()
+	go f.maestro.run(f.stop)
 	f.syncMIDIClock(false)
 	return f, nil
 }
@@ -105,6 +107,11 @@ func NewFeature(state string) (*Feature, error) {
 		webUIURL:          envWebUIURL(),
 		lastExternalClock: -1e9,
 		openMIDISink:      openALSAMIDISink,
+	}
+	var err error
+	f.maestro, err = newMaestro(state)
+	if err != nil {
+		return nil, err
 	}
 	show := filepath.Join(state, "show.json")
 	if _, err := os.Stat(show); err == nil {
@@ -498,10 +505,19 @@ func (f *Feature) statusLocked() map[string]any {
 		config[k] = v
 	}
 	return map[string]any{"config": config, "profiles": Profiles, "running": f.Running, "error": f.Error, "frames": frames,
-		"clock": f.clockStatusLocked(f.now())}
+		"maestro": f.maestro.status(), "clock": f.clockStatusLocked(f.now())}
 }
 
 func (f *Feature) Action(req map[string]any) (any, error) {
+	if a, ok := req["action"].(string); ok && strings.HasPrefix(a, "maestro") {
+		if err := f.maestro.action(a, req, f.state); err != nil {
+			return nil, err
+		}
+		return f.Status()
+	}
+	if req["action"] == "stop" {
+		f.maestro.stop()
+	}
 	syncMIDI := false
 	defer func() {
 		if syncMIDI {
@@ -624,6 +640,11 @@ func (f *Feature) Close() {
 		case <-f.clockDone:
 		case <-time.After(2 * time.Second):
 		}
+	}
+	if f.looping {
+		<-f.maestro.done
+	} else {
+		f.maestro.stop()
 	}
 	f.syncMIDIClock(true)
 	f.mu.Lock()

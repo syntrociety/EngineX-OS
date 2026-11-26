@@ -52,6 +52,7 @@ var shadowDataRoot, shadowMediaRoot, shadowBeaconOn = "/data", "/media", true
 
 // deckState is one deck as a shadow deck follows it.
 type deckState struct {
+	LightTag     string  `json:"lightTag,omitempty"`
 	baseKey      string  // source-only file identity; Key also identifies the loaded session
 	Deck         int     `json:"deck"`
 	Src          int     `json:"src,omitempty"`  // shadow deck in another slot than the source's own deck number (#160): that number, by which stock's position mirror names it
@@ -343,6 +344,8 @@ func (c cdjSeen) exact(pitch float64) float64 {
 }
 
 type shadowState struct {
+	lightMu        sync.Mutex
+	lightCache     [5]lightLookup
 	fetchCalls     atomic.Uint64
 	fetchCDJCalls  atomic.Uint64
 	mu             sync.Mutex
@@ -696,6 +699,7 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		if logIt {
 			log.Printf("stream-sync: shadow: deck %d track %q has no local file", d.Deck, np)
 		}
+		d.LightTag = s.shadow.lightTag(d.Deck, d.Path, d.Key)
 		own = append(own, d)
 	}
 	// Pro DJ Link players see these decks in our status: playing, tempo and
@@ -843,6 +847,9 @@ func (sh *shadowState) ownForPeer(now time.Time) []deckState {
 }
 
 type clockDeck struct {
+	TrackKey   string  `json:"trackKey,omitempty"`
+	Title      string  `json:"title,omitempty"`
+	LightTag   string  `json:"lightTag,omitempty"`
 	Deck       int     `json:"deck"`
 	Source     string  `json:"source"`
 	SourceID   string  `json:"sourceId,omitempty"`
@@ -887,6 +894,15 @@ func (s *Server) deckClockPost(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		seen[d.Deck] = true
+		local := netPathFile(d.Net, s.shadow.dataRoot, s.shadow.mediaRoot)
+		d.Key = ""
+		if local != "" {
+			d.Key = fmt.Sprintf("%x", fnvSum(d.Net))
+		}
+		d.LightTag = s.shadow.lightTag(d.Deck, local, d.Key)
+		if d.Title == "" && local != "" {
+			d.Title = filepath.Base(local)
+		}
 		if d.At > nowMS || d.At < nowMS-2000 {
 			d.At = nowMS
 		}
@@ -930,6 +946,7 @@ func carriedClockDeck(d deckState, source, sourceID string, lastSeen time.Time, 
 	master := d.Master != nil && *d.Master
 	lead := d.Lead != nil && *d.Lead
 	return clockDeck{
+		TrackKey: d.Key, Title: d.Title, LightTag: d.LightTag,
 		Deck:       d.Deck,
 		Source:     source,
 		SourceID:   sourceID,

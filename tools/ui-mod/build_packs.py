@@ -1670,6 +1670,18 @@ SERVICES_MAIN = """
 	// #209: lightweight local deck beat clock when 4-deck shadow mode is off.
 	// Active only while stream-sync reports deckClock=true; zero work otherwise.
 	property bool scDeckClock: false
+	// Track identity binding updates on a load/eject. Keep string translator reads
+	// out of the high-frequency beat sampler.
+	property var scLightTracks: {
+		const paths = [""]
+		if (scDeckClock && scFourDeckRole === "") {
+			for (let d = 1; d <= 4; d++) {
+				const prop = root.scTr("/Engine/Deck" + d + "/Track/TrackNetworkPath")
+				paths[d] = prop ? prop.string : ""
+			}
+		}
+		return paths
+	}
 	property var scDeckClockRequest: null
 	property var scDeckClockProps: ({})
 	property var scDeckClockProbeAt: ({})
@@ -1743,6 +1755,7 @@ SERVICES_MAIN = """
 			const currentBpm = g.current.unnormalized || 0
 			const beat = g.beat.unnormalized || 0
 			const o = out[count] || (out[count] = {})
+			o.net = loaded && root.scLightTracks ? (root.scLightTracks[d] || "") : ""
 			o.deck = d; o.playing = playing; o.cue = cue; o.master = master; o.lead = master
 			o.bpm = bpm; o.currentBpm = currentBpm; o.beat = beat; o.positionMs = posMs; o.at = now
 			count++

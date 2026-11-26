@@ -11,6 +11,8 @@ Rectangle {
     property string message: "Start this Mod's start.sh helper to connect."
     property int universe: 1
     property bool initialized: false
+    property bool helperOnline: false
+    property string actionError: ""
     // #209 beat clock: the Go helper polls stream-sync directly (no deck Panel
     // required). Toggling the panel switch sends `follow` without writing show.json.
     property bool followDeck: true
@@ -31,7 +33,9 @@ Rectangle {
         if (body) xhr.setRequestHeader("Content-Type", "application/json")
         xhr.onreadystatechange = function() {
             if (xhr.readyState !== XMLHttpRequest.DONE) return
-            if (xhr.status !== 200) { root.message = xhr.responseText || "Helper unavailable. Run start.sh on the player."; return }
+            if (xhr.status !== 200) { if (!body) root.helperOnline=false; if (body) root.actionError=xhr.responseText || "Helper unavailable"; root.message = xhr.responseText || "Helper unavailable. Run start.sh on the player."; return }
+            root.helperOnline=true
+            if (body) root.actionError=""
             var value = JSON.parse(xhr.responseText)
             if (value.clock) {
                 root.clockText = root.formatClock(value.clock)
@@ -72,8 +76,9 @@ Rectangle {
     ColumnLayout {
         anchors.fill: parent; anchors.margins: 14; spacing: 8
         Label { text: "DMX STUDIO · Independent lighting console"; color: "white"; font.pixelSize: 24 }
-        Label { text: root.message; color: root.state.running ? "#54f0b1" : "#f8ca76"; wrapMode: Text.Wrap; Layout.fillWidth: true }
+        Label { text: root.actionError || root.message; color: root.state.running ? "#54f0b1" : "#f8ca76"; wrapMode: Text.Wrap; Layout.fillWidth: true }
         RowLayout {
+            visible: tabs.currentIndex !== 0
             Button { text: "Apply controls / show"; enabled: root.initialized; onClicked: root.apply() }
             Button { text: "START OUTPUT"; onClicked: root.request({action:"start"}) }
             Button { text: "BLACKOUT / STOP"; onClicked: { armed.checked = false; root.request({action:"stop"}) } }
@@ -82,6 +87,7 @@ Rectangle {
         }
         TabBar {
             id: tabs; Layout.fillWidth: true
+            TabButton { text: "MaestroDMX" }
             TabButton { text: "Fixtures & output" }
             TabButton { text: "BPM / EFX / smoke" }
             TabButton { text: "2D stage" }
@@ -89,6 +95,7 @@ Rectangle {
         }
         StackLayout {
             currentIndex: tabs.currentIndex; Layout.fillWidth: true; Layout.fillHeight: true
+            MaestroPane { status: root.helperOnline ? (root.state.maestro || {}) : ({}); available: root.helperOnline && !!root.state.maestro; onCommand: root.request(body) }
             ScrollView {
                 clip: true
                 ColumnLayout {

@@ -24,6 +24,9 @@ func envWebUIURL() string {
 }
 
 type deckSnapshot struct {
+	TrackKey   string  `json:"trackKey,omitempty"`
+	LightTag   string  `json:"lightTag,omitempty"`
+	Title      string  `json:"title,omitempty"`
 	Deck       int     `json:"deck"`
 	Source     string  `json:"source"`
 	SourceID   string  `json:"sourceId"`
@@ -288,6 +291,7 @@ func (f *Feature) pollClockOnce() time.Duration {
 	follow, _ := f.Config["followDeck"].(bool)
 	now := f.now()
 	if !follow {
+		f.maestro.observe(nil, time.Now())
 		if f.clock.deck != 0 && f.pollerActive {
 			f.clock.toManual(now, f.Config["bpm"].(float64))
 			f.pollerActive = false
@@ -296,6 +300,7 @@ func (f *Feature) pollClockOnce() time.Duration {
 		return 250 * time.Millisecond
 	}
 	if now-f.lastExternalClock < clockStale {
+		f.maestro.observe(nil, time.Now())
 		f.mu.Unlock()
 		return 150 * time.Millisecond
 	}
@@ -319,6 +324,11 @@ func (f *Feature) pollClockOnce() time.Duration {
 	defer f.mu.Unlock()
 	if follow, _ := f.Config["followDeck"].(bool); !follow || now-f.lastExternalClock < clockStale {
 		return 250 * time.Millisecond
+	}
+	if fallback {
+		f.maestro.observe(nil, time.Now())
+	} else {
+		f.maestro.observe(decks, time.Now())
 	}
 	manual := f.Config["bpm"].(float64)
 	if picked == nil {

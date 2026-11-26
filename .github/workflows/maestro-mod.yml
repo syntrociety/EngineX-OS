@@ -1,0 +1,49 @@
+name: Maestro DMX Studio
+on:
+  push:
+    branches: [feat/maestro-dmx-studio]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  mod:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test deck clock, OSC transport, MIDI and existing DMX
+        run: go test -race ./docs/mods/src/dmx-studio ./docs/mods/src/helper
+      - name: Build the standalone mod for both deck architectures
+        run: |
+          python3 - <<'PY'
+          import sys, tempfile
+          from pathlib import Path
+          sys.path.insert(0, "tools/mods")
+          import build_official_mods as b
+          mod = next(m for m in b.MODS if m["id"] == "dmx-studio")
+          with tempfile.TemporaryDirectory() as tmp:
+              files = b.package_files(mod, b.build_helpers(Path(tmp)))
+          b.validate(files)
+          Path("dmx-studio-maestro.tar.gz").write_bytes(b.archive(files))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dmx-studio-maestro
+          path: dmx-studio-maestro.tar.gz
+      - name: Verify native Qt Quick panel
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-pyqt5.qtquick qml-module-qtquick-controls2 qml-module-qtquick-layouts qml-module-qtquick2
+          QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software /usr/bin/python3 tools/mods/check_maestro_panel.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: maestro-qml-preview
+          path: maestro-panel.png
+      - name: Verify gateway ingestion and peer metadata
+        run: go test ./pkg/webui -run 'Test(LightingTag|DeckClock|OwnForPeer)'
+      - name: Verify lightweight clock producer
+        working-directory: tools/az01-packer
+        run: python3 -m unittest -k test_deck_clock_feed_for_dmx_without_panel test_ui_mod

@@ -131,3 +131,35 @@ phrase scene cycling, ALSA MIDI clock out, and all remaining model variants
 remain **unverified on real lighting / MIDI hardware**. Do not infer full
 hardware validation from manifest validation, unit tests, or registry model
 targeting.
+
+## MaestroDMX (fork)
+
+Enable this mod on the sending player. In **MaestroDMX → Uitgang & MIDI** set the
+controller's wired IPv4 address, UDP port (default 7672) and phrase length.
+In **Tags & shows** map a comment marker such as `[licht:peak]` to a **unique
+saved show name**. **Showregie → Schakel OSC in** arms the output for this
+session. A fresh, unambiguous playing deck supplies the clock. Held deck CUE,
+ambiguous leaders and missing metadata suppress changes. The worker sends
+`/show/name ,s` followed by `/show/play` on a future phrase boundary. The last
+request is shown as sent. UDP does not confirm the active show. Timing of a full
+show load depends on the controller firmware. Audio and fixture control stay
+on Maestro. Closing the panel leaves the helper running. Restart disarms OSC.
+
+The clock extension in this fork supplies track identity and the tag read from
+the source volume's Engine database, read-only. Both players need the matching
+gateway for peer tags. The lightweight local-clock mode also needs the matching
+UI pack. A stock 1.2.0 clock lacks these fields and can only display deck timing.
+Paired/shadow mode is needed to expose the second player. A missing or
+conflicting light tag keeps the last show. Use one local and one peer playback
+layer for two-channel fader tracking.
+
+Optional Xone:96 input: connect MIDI OUT to a CME H4MIDI WC DIN input, route that
+input to the CME USB-C device port and connect it to the sender's USB-A host.
+Select its Linux raw MIDI input on the panel. Default MIDI channel is 16.
+Assign channel faders (CC 0–3) to the local and peer player. Leave crossfader
+on bypass when the channels go directly to the mix. For X/Y assignments, select
+the matching orientation and CC (normally 5). Move each mapped fader once to
+establish its position. Deckmix shows live values and the latest CC. Before
+initialization or after unplug, the clock chooses the source. A closed fader
+suppresses its deck once the mixer is initialized. This is an estimate from
+controls. The controller's physical audio input remains the mixed programme.

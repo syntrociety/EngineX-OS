@@ -34,7 +34,7 @@ var midiDevice = regexp.MustCompile("^/dev/snd/midiC[0-9]+D[0-9]+$")
 
 func (c maestroSettings) validate() error {
 	ip := net.ParseIP(c.Host)
-	if c.Host != "" && (ip.To4() == nil || strings.Contains(c.Host, ":") || !(ip.IsGlobalUnicast() || ip.IsLinkLocalUnicast())) {
+	if c.Host != "" && (ip.To4() == nil || strings.Contains(c.Host, ":") || !(ip.IsGlobalUnicast() || ip.IsLinkLocalUnicast() || ip.IsLoopback())) {
 		return modkit.Bad("Gebruik het unicast IPv4-adres van Maestro")
 	}
 	if c.Port < 1 || c.Port > 65535 || (c.Phrase != 16 && c.Phrase != 32) {
@@ -72,13 +72,19 @@ type maestro struct {
 }
 
 func newMaestro(state string) (*maestro, error) {
-	m := &maestro{cfg: maestroSettings{Port: 7672, Phrase: 32, Channel: 16, PeerCC: 1, CrossCC: 5, Shows: map[string]string{}}, done: make(chan struct{})}
+	m := &maestro{cfg: maestroSettings{Port: 7672, Phrase: 32, Channel: 16, PeerCC: 1, CrossCC: 5, Shows: map[string]string{}}}
 	m.midi.reset()
-	err := modkit.LoadJSON(filepath.Join(state, "maestro.json"), &m.cfg)
-	if err != nil && !os.IsNotExist(err) {
-		return nil, err
+	saved := m.cfg
+	err := modkit.LoadJSON(filepath.Join(state, "maestro.json"), &saved)
+	if err == nil {
+		err = saved.validate()
 	}
-	return m, m.cfg.validate()
+	if err != nil && !os.IsNotExist(err) {
+		m.fault = "Maestro-configuratie kon niet worden geladen: " + err.Error()
+	} else if err == nil {
+		m.cfg = saved
+	}
+	return m, nil
 }
 func (m *maestro) stop() {
 	m.sendMu.Lock()
@@ -92,7 +98,12 @@ func (m *maestro) stop() {
 	m.clearClock()
 	m.last = ""
 }
-func (m *maestro) clearClock() { m.source = ""; m.track = ""; m.next = ""; m.beats = 0 }
+func (m *maestro) clearClock() {
+	m.source = ""
+	m.track = ""
+	m.next = ""
+	m.beats = 0
+}
 func (m *maestro) action(action string, req map[string]any, state string) error {
 	if action == "maestroStop" {
 		m.stop()
@@ -257,6 +268,14 @@ func (m *maestro) tick(now time.Time) {
 	defer m.sendMu.Unlock()
 	m.mu.Lock()
 	beat, valid := m.phase(now)
+	if valid && m.midi.ready(m.cfg) {
+		current := m.selectDeck(m.decks)
+		if current == nil || current.SourceID != m.source {
+			m.clearClock()
+			m.mu.Unlock()
+			return
+		}
+	}
 	idx := int(math.Floor(beat / float64(m.cfg.Phrase)))
 	if !valid || m.socket == nil || idx <= m.boundary {
 		m.mu.Unlock()

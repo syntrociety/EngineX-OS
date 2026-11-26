@@ -12,6 +12,7 @@ Rectangle {
     readonly property var midi: status.midi || ({})
     readonly property var decks: status.decks || []
     readonly property color accent: "#d2f47c"
+    property alias screen: views.currentIndex
     property string editingTag: ""
     property bool settingUp: false
 

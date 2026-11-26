@@ -95,7 +95,7 @@ Rectangle {
         }
         StackLayout {
             currentIndex: tabs.currentIndex; Layout.fillWidth: true; Layout.fillHeight: true
-            MaestroPane { status: root.helperOnline ? (root.state.maestro || {}) : ({}); available: root.helperOnline && !!root.state.maestro; onCommand: root.request(body) }
+            MaestroPane { id: maestroPane; status: root.helperOnline ? (root.state.maestro || {}) : ({}); available: root.helperOnline && !!root.state.maestro; onCommand: root.request(body) }
             ScrollView {
                 clip: true
                 ColumnLayout {

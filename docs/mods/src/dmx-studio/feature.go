@@ -82,6 +82,7 @@ func New(env modkit.Env) (modkit.Feature, error) {
 	f.looping = true
 	go f.loop()
 	go f.clockLoop()
+	f.maestro.done = make(chan struct{})
 	go f.maestro.run(f.stop)
 	f.syncMIDIClock(false)
 	return f, nil
@@ -641,7 +642,7 @@ func (f *Feature) Close() {
 		case <-time.After(2 * time.Second):
 		}
 	}
-	if f.looping {
+	if f.maestro.done != nil {
 		<-f.maestro.done
 	} else {
 		f.maestro.stop()

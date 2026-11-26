@@ -117,7 +117,60 @@ func boardCapabilities(board string) uiCapabilities {
 	}
 }
 
-const defaultUIDir = "/data/enginex/ui"
+const (
+	defaultUIDir           = "/data/enginex/ui"
+	maxTrackedWriteClients = 64
+)
+
+// writeSeqTracker enforces monotonic per-client write ordering under the caller's write lock,
+// preventing a delayed or timed-out POST from overwriting a newer committed setting.
+type writeSeqTracker struct {
+	seqs  map[string]int64
+	order []string
+}
+
+func parseClientWriteSeq(r *http.Request) (clientID string, seq int64, ok bool) {
+	clientID = strings.TrimSpace(r.Header.Get("X-UI-Client-Id"))
+	raw := strings.TrimSpace(r.Header.Get("X-UI-Write-Seq"))
+	if clientID == "" || raw == "" || len(clientID) > 64 {
+		return "", 0, false
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n <= 0 {
+		return "", 0, false
+	}
+	return clientID, n, true
+}
+
+func (t *writeSeqTracker) stale(clientID string, seq int64) bool {
+	if clientID == "" || seq <= 0 || t.seqs == nil {
+		return false
+	}
+	last, ok := t.seqs[clientID]
+	return ok && seq <= last
+}
+
+func (t *writeSeqTracker) record(clientID string, seq int64) {
+	if clientID == "" || seq <= 0 {
+		return
+	}
+	if t.seqs == nil {
+		t.seqs = make(map[string]int64)
+	}
+	if last, ok := t.seqs[clientID]; ok {
+		if seq > last {
+			t.seqs[clientID] = seq
+		}
+		return
+	}
+	if len(t.order) >= maxTrackedWriteClients {
+		evict := t.order[0]
+		t.order = t.order[1:]
+		delete(t.seqs, evict)
+	}
+	t.order = append(t.order, clientID)
+	t.seqs[clientID] = seq
+}
 
 var (
 	uiLanguages      = []string{"en", "zh-Hans", "zh-Hant", "es"}
@@ -1126,7 +1179,17 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	clientID, writeSeq, hasWriteSeq := parseClientWriteSeq(r)
 	s.uiMu.Lock()
+	if r.Context().Err() != nil {
+		s.uiMu.Unlock()
+		return
+	}
+	if hasWriteSeq && s.uiWriteSeq.stale(clientID, writeSeq) {
+		s.uiMu.Unlock()
+		fail(w, http.StatusConflict, errors.New("stale write sequence"))
+		return
+	}
 	v := s.loadUI()
 	prevShadowMode := v.ShadowMode
 	prevConsoleHTTPS := v.ConsoleHTTPS
@@ -1588,6 +1651,10 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		v.Scope = want
 	}
+	if r.Context().Err() != nil {
+		s.uiMu.Unlock()
+		return
+	}
 	// Relay settings are written only once every field is known to be valid (#9).
 	if q.Has("relayUrl") || q.Has("deemixPassword") {
 		var relay, password *string
@@ -1614,6 +1681,10 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	if slices.Contains(uiServices, v.Scope) && !slices.Contains(v.Sources, v.Scope) {
 		v.Scope = ""
 	}
+	if r.Context().Err() != nil {
+		s.uiMu.Unlock()
+		return
+	}
 	err := s.saveUI(v, q.Has("prolinkShare"))
 	if err != nil && q.Has("verboseLog") {
 		_ = writeVerboseLog(previousVerbose)
@@ -1624,6 +1695,9 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			_ = s.saveUI(v)
 			err = herr
 		}
+	}
+	if err == nil && hasWriteSeq {
+		s.uiWriteSeq.record(clientID, writeSeq)
 	}
 	s.uiMu.Unlock()
 	if err != nil {

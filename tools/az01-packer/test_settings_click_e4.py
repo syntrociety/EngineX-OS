@@ -603,6 +603,256 @@ assert.equal(scBtLayer, 'Booth');
 """
         run_node(script)
 
+    def _round2_js_harness(self):
+        main = self.bp.SERVICES_MAIN
+        names = (
+            "scCall scUiPollReply scUiSyncPending scUiFlush scApplyQuery "
+            "scSameItems scFxMsInteger scFxMsApply scLoginDone scBtLoad "
+            "scBtSend scBtSet scBtReply scTunnelApply scTunnelSend scTunnelToggle"
+        )
+        main_js = "\n".join(filter(None, (extract_function(main, n, optional=True) for n in names.split())))
+        fx = self.bp.FX_CONTROLLER.replace("    function ", "\tfunction ")
+        knob_js = "\n".join(extract_function(fx, n) for n in ("scFxMsSet", "scFxMsFlush", "scFxMsExpire"))
+        return """
+const assert = require('node:assert/strict'), reqs = [];
+let now = 100000;
+Date.now = () => now;
+globalThis.root = globalThis;
+Object.assign(root, {
+    scClientId: 'qml-r2', scUiWriteSeq: 0, scBtWriteSeq: 0, scTunnelWriteSeq: 0,
+    scUiAppliedSeq: 0, scScopeNeedRefresh: false,
+    scUiWriteGen: 0, scUiPollGen: 0, scUiPending: 0, scUiQueue: [], scUiSending: false,
+    scUiSendingAt: 0, scUiSendToken: 0, scUiSendXhr: null, scUiHadError: false,
+    scTunnelPending: 0, scTunnelSending: false, scTunnelQueued: null, scTunnelSendingAt: 0,
+    scTunnelSendToken: 0, scTunnelSendXhr: null,
+    scRemoteAccess: false, scRemoteAccessStatus: 'stopped', scRemoteAccessUrl: '', scRemoteAccessError: '',
+    scScope: '', scScopePending: 0, scUiPoll: null, scUiPollScope: '', scUiPollAt: 0,
+    scUiDigest: '', scUiAppliedAt: 0, scUiLoaded: true, scLoggedIn: [], scSources: ['spotify'],
+    scLoginOpen: '', scLogin: '', scEnterTries: 0, scEnterTimer: {start() {}},
+    Planck: {librarianController: {streamingPlaylistsController: {invalidateUI() {}}}},
+    scBtSending: false, scBtSendingAt: 0, scBtQueued: '', scBtGen: 0, scBtSendToken: 0,
+    scBtSendXhr: null, scBtReload: false, scBtLayers: ['Master', 'Booth', 'Headphones'], scBtLayer: 'Master',
+    scSdHighSpeed: false, scMasterLimiter: false, scAutoGain: false, scLedBrightness: 100, scLedBrightnessSaved: 100,
+    scFxTimeMode: 'ms', scFxTimeMs: 500, scFxMsSending: false, scFxMsRequest: 0,
+    scFxMsWanted: -1, scFxMsSent: -1,
+});
+class XMLHttpRequest {
+    constructor() { this.readyState = 0; this.reqHeaders = {}; this.aborted = false; }
+    open(method, url) { Object.assign(this, {method, url, readyState: 1}); }
+    setRequestHeader(k, v) { this.reqHeaders[k] = v; }
+    send(body) { this.body = body; reqs.push(this); }
+    abort() { this.aborted = true; this.readyState = 0; }
+    getResponseHeader() { return this.digest || ''; }
+    finish(data, digest = '', status = 200) {
+        Object.assign(this, {readyState: 4, status, responseText: JSON.stringify(data), digest});
+        if (this.onreadystatechange) this.onreadystatechange();
+    }
+}
+function scEnsureTidal() {}
+function scOpen(id) { scScope = id; }
+function scApply(v) {
+    if (v.scope !== undefined) scScope = v.scope;
+    if (v.loggedIn) scLoggedIn = v.loggedIn;
+    if (v.sources) scSources = v.sources;
+    if (v.fxTimeMs !== undefined) scFxMsApply('ms', v.fxTimeMs);
+    if (v.tunnel) scTunnelApply(v.tunnel);
+}
+""" + main_js + "\n" + knob_js + "\n"
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_qr_callback_keeps_newer_login_list(self):
+        run_node(self._round2_js_harness() + """
+// Case 1: newer settings ACK reports Spotify revoked before older QR GET returns.
+scLoginOpen = 'spotify';
+scLogin = 'spotify';
+scLoginDone();
+const older = reqs.at(-1);
+scCall('masterLimiter=1');
+const revoked = {sources: ['spotify'], loggedIn: []};
+reqs.at(-1).finish(revoked, 'revoked');
+older.finish({sources: ['spotify'], loggedIn: ['spotify']}, 'before-revocation');
+scCall('');
+reqs.at(-1).finish(revoked, 'revoked');
+assert.deepEqual(scLoggedIn, [], 'older QR GET restored revoked Spotify despite current digest');
+assert.notEqual(scScope, 'spotify', 'older QR GET opened a revoked provider');
+
+// Case 2: newer periodic poll reports Spotify revoked (no settings write) before older QR GET returns.
+scLoginOpen = 'spotify';
+scLogin = 'spotify';
+scLoginDone();
+const older2 = reqs.at(-1);
+scCall('');
+reqs.at(-1).finish(revoked, 'revoked-poll');
+older2.finish({sources: ['spotify'], loggedIn: ['spotify']}, 'before-poll-revocation');
+assert.deepEqual(scLoggedIn, [], 'older QR GET must not override newer poll login list');
+assert.notEqual(scScope, 'spotify', 'older QR GET must not open provider revoked by poll');
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_rejected_scope_recovers_after_overlapping_setting(self):
+        run_node(self._round2_js_harness() + """
+scScope = 'deezer';
+scCall('masterLimiter=1');
+const setting = reqs.at(-1);
+scScope = 'spotify';
+scCall('scope=spotify', () => { throw Error('a rejected choice cannot succeed'); });
+reqs.at(-1).finish({}, '', 409);
+const state = {scope: 'deezer', masterLimiter: true};
+reqs.at(-1).finish(state, 'server');
+setting.finish(state, 'server');
+for (let i = 0; i < 2; i++) {
+    now += 3000;
+    scCall('');
+    reqs.at(-1).finish(state, 'server');
+}
+assert.equal(scScope, 'deezer', '409 recovery cached a digest without restoring server scope');
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_bluetooth_queue_recovers_without_another_tap(self):
+        run_node(self._round2_js_harness() + """
+scBtSet('Booth');
+const hungBooth = reqs.at(-1);
+scBtSet('Headphones');
+scBtLoad();
+let hp = null;
+for (let tick = 1; tick <= 8; tick++) {
+    now += 3000;
+    scCall('');
+    const poll = reqs.at(-1);
+    if (poll.method === 'GET' && poll.readyState !== 4) poll.finish({}, 'same');
+    if (!hp) {
+        hp = reqs.find(x => x.method === 'POST' && x.url.endsWith('assignLayer=Headphones'));
+        if (hp) {
+            assert.equal(hungBooth.aborted, true, 'hung Booth assignment must be aborted by 3s watchdog');
+            const beforeCount = reqs.length;
+            hp.finish({layers: ['Master', 'Booth', 'Headphones'], assignLayer: 'Headphones'});
+            assert.equal(scBtLayer, 'Headphones');
+            // Deferred scBtLoad runs after the recovered write finishes.
+            assert.equal(reqs.length, beforeCount + 1);
+            assert.equal(reqs.at(-1).method, 'GET');
+            assert.ok(reqs.at(-1).url.endsWith('/v1/enginex/bluetooth'));
+            reqs.at(-1).finish({layers: ['Master', 'Booth', 'Headphones'], assignLayer: 'Headphones'});
+        }
+    }
+}
+assert.ok(hp, 'latest Bluetooth choice was never sent after 24 seconds');
+// Late reply from hungBooth must be ignored.
+hungBooth.finish({layers: ['Master', 'Booth', 'Headphones'], assignLayer: 'Booth'});
+assert.equal(scBtLayer, 'Headphones');
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_knob_keeps_last_step_while_another_setting_is_slow(self):
+        run_node(self._round2_js_harness() + """
+let deadline = 0, persisted = 500;
+const scFxMsTimeout = { restart() { deadline = now + 2000; }, stop() { deadline = 0; } };
+function completeKnobWrites() {
+    let x;
+    while ((x = reqs.find(q => q.method === 'POST' && q.readyState !== 4 && q.url.includes('?fxTimeMs=')))) {
+        persisted = Number(x.url.split('=').at(-1));
+        x.finish({fxTimeMs: persisted}, String(persisted));
+    }
+}
+scCall('sdHighSpeed=1');
+const slow = reqs[0];
+scFxMsSet(510);
+scFxMsSet(520);
+completeKnobWrites();
+now += 2100;
+if (deadline && now >= deadline) scFxMsExpire();
+slow.finish({fxTimeMs: persisted}, 'sd-ready');
+completeKnobWrites();
+assert.equal(persisted, 520, 'the last knob step was discarded while waiting for the unrelated write');
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_write_seq_headers_monotonic_across_endpoints(self):
+        run_node(self._round2_js_harness() + """
+scCall('ledBrightness=80');
+const ui1 = reqs.at(-1);
+assert.equal(ui1.reqHeaders['X-UI-Client-Id'], 'qml-r2');
+assert.equal(ui1.reqHeaders['X-UI-Write-Seq'], '1');
+ui1.finish({ledBrightness: 80}, 'u1');
+scCall('ledBrightness=60');
+const ui2 = reqs.at(-1);
+assert.equal(ui2.reqHeaders['X-UI-Client-Id'], 'qml-r2');
+assert.equal(ui2.reqHeaders['X-UI-Write-Seq'], '2');
+ui2.finish({ledBrightness: 60}, 'u2');
+
+scBtSet('Booth');
+const bt1 = reqs.at(-1);
+assert.equal(bt1.reqHeaders['X-UI-Client-Id'], 'qml-r2');
+assert.equal(bt1.reqHeaders['X-UI-Write-Seq'], '1');
+bt1.finish({layers: ['Master', 'Booth'], assignLayer: 'Booth'});
+scBtSet('Headphones');
+const bt2 = reqs.at(-1);
+assert.equal(bt2.reqHeaders['X-UI-Write-Seq'], '2');
+bt2.finish({layers: ['Master', 'Booth', 'Headphones'], assignLayer: 'Headphones'});
+
+scTunnelToggle(true);
+const tun1 = reqs.at(-1);
+assert.equal(tun1.reqHeaders['X-UI-Client-Id'], 'qml-r2');
+assert.equal(tun1.reqHeaders['X-UI-Write-Seq'], '1');
+tun1.finish({enabled: true, status: 'running'});
+scTunnelToggle(false);
+const tun2 = reqs.at(-1);
+assert.equal(tun2.reqHeaders['X-UI-Write-Seq'], '2');
+""")
+
+    def test_sandbox_dbus_cleanup_trap_enforces_stop_and_fails_on_lost_pid(self):
+        if not Path("/proc/self/stat").exists():
+            self.skipTest("Linux /proc required to verify sandbox D-Bus cleanup traps")
+        launchers = [
+            (REPO / "tools/az01-packer/test_settings_click_sandbox.sh", "cleanup"),
+            (REPO / "tools/az01-packer/test_fx_selector_sandbox.sh", "fx_cleanup"),
+        ]
+        for path, fn_name in launchers:
+            src = path.read_text(encoding="utf-8")
+            m = re.search(rf"(?ms)^{fn_name}\(\) \{{.*?^\}}", src)
+            self.assertIsNotNone(m, f"{path.name} missing {fn_name}()")
+            trap_fn = m.group(0)
+            self.assertIn("--print-pid=1", src)
+            self.assertIn("dbus_started=1", src)
+            self.assertIn('kill -0 "$dbus_pid"', src)
+            for mode, want_rc in (("normal", 0), ("fail-exit", 7), ("lose-pid", 1)):
+                with self.subTest(launcher=path.name, mode=mode):
+                    with tempfile.TemporaryDirectory(prefix="e4-dbus-trap-") as tmp:
+                        pidfile = Path(tmp) / "dummy.pid"
+                        script = f"""
+set -euo pipefail
+R=""
+board=JP14
+PRODUCT=JP07
+server=""
+http_pid=""
+dbus_started=1
+dbus_pid=""
+{trap_fn}
+trap {fn_name} EXIT
+sleep 30 >/dev/null 2>&1 &
+dbus_pid=$!
+printf '%s\\n' "$dbus_pid" > "{pidfile}"
+if [ "{mode}" = "lose-pid" ]; then
+    dbus_pid=""
+fi
+if [ "{mode}" = "fail-exit" ]; then
+    exit 7
+fi
+exit 0
+"""
+                        res = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+                        dummy_pid = int(pidfile.read_text(encoding="utf-8").strip())
+                        try:
+                            self.assertEqual(res.returncode, want_rc, f"stderr={res.stderr}")
+                            if mode in ("normal", "fail-exit"):
+                                alive = subprocess.run(["kill", "-0", str(dummy_pid)], capture_output=True).returncode == 0
+                                self.assertFalse(alive, f"{path.name} {fn_name}() left dummy daemon {dummy_pid} alive")
+                            else:
+                                self.assertIn("dbus_cleanup_pid_lost", res.stderr)
+                        finally:
+                            subprocess.run(["kill", "-9", str(dummy_pid)], capture_output=True)
+
 
 if __name__ == "__main__":
     unittest.main()

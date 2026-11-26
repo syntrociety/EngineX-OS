@@ -560,6 +560,16 @@ func (s *Server) tunnelPost(w http.ResponseWriter, r *http.Request) {
 	if !input(w, r, &req) {
 		return
 	}
+	clientID, writeSeq, hasWriteSeq := parseClientWriteSeq(r)
+	s.tunnelWriteMu.Lock()
+	defer s.tunnelWriteMu.Unlock()
+	if r.Context().Err() != nil {
+		return
+	}
+	if hasWriteSeq && s.tunnelWriteSeq.stale(clientID, writeSeq) {
+		fail(w, http.StatusConflict, errors.New("stale write sequence"))
+		return
+	}
 	enabled := mgr.Status(s.cfg.AccessToken).Enabled
 	if req.Enabled != nil {
 		enabled = *req.Enabled
@@ -567,6 +577,9 @@ func (s *Server) tunnelPost(w http.ResponseWriter, r *http.Request) {
 	if err := mgr.Configure(enabled, req.Token); err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
+	}
+	if hasWriteSeq {
+		s.tunnelWriteSeq.record(clientID, writeSeq)
 	}
 	respond(w, mgr.Status(s.cfg.AccessToken))
 }

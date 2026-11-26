@@ -67,7 +67,9 @@ FX_CONTROLLER = r'''
     Timer { id: scFxMsTimeout; interval: 2000; onTriggered: root.scFxMsExpire() }
     function scFxMsExpire() {
         ++scFxMsRequest
-        scFxMsSending = false; scFxMsWanted = -1; scFxMsSent = -1
+        scFxMsSending = false; scFxMsSent = -1
+        if (scFxTimeMode !== "ms") { scFxMsWanted = -1; return }
+        if (scFxMsWanted >= 10) scFxMsFlush()
     }
     property int scFxMsWanted: -1
     property int scFxMsSent: -1
@@ -78,13 +80,15 @@ FX_CONTROLLER = r'''
         const ms = scFxMsWanted
         scFxMsWanted = -1; scFxMsSent = ms; scFxMsSending = true
         const request = ++scFxMsRequest
-        scFxMsTimeout.restart()
+        if (typeof scUiQueue === "undefined") scFxMsTimeout.restart()
         scCall("fxTimeMs=" + ms, function() {
             if (request !== scFxMsRequest) return
             scFxMsTimeout.stop()
             scFxMsSending = false; scFxMsSent = -1
             if (scFxMsWanted === scFxTimeMs) scFxMsWanted = -1
             scFxMsFlush()
+        }, function() {
+            if (request === scFxMsRequest) scFxMsTimeout.restart()
         })
     }
     function scFxMsSet(ms) {
@@ -3476,6 +3480,7 @@ SERVICES_MAIN = """
 	property real scTunnelSendingAt: 0
 	property int scTunnelSendToken: 0
 	property var scTunnelSendXhr: null
+	property int scTunnelWriteSeq: 0
 	function scTunnelApply(v) {
 		if (!v) return
 		scRemoteAccess = !!v.enabled
@@ -3490,7 +3495,15 @@ SERVICES_MAIN = """
 		const x = new XMLHttpRequest()
 		scTunnelSendXhr = x
 		x.open("POST", "http://127.0.0.1:8080/v1/enginex/tunnel")
-		x.setRequestHeader("Content-Type", "application/json")
+		if (typeof x.setRequestHeader === "function") {
+			x.setRequestHeader("Content-Type", "application/json")
+			const cid = typeof scClientId !== "undefined" && scClientId ? scClientId : ""
+			const seq = typeof scTunnelWriteSeq !== "undefined" ? ++scTunnelWriteSeq : 0
+			if (cid && seq > 0) {
+				x.setRequestHeader("X-UI-Client-Id", cid)
+				x.setRequestHeader("X-UI-Write-Seq", String(seq))
+			}
+		}
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4 || token !== scTunnelSendToken) return
 			scTunnelSending = false
@@ -3504,6 +3517,8 @@ SERVICES_MAIN = """
 			scTunnelPending = 0
 			if (typeof scUiWriteGen !== "undefined") scUiWriteGen++
 			if (typeof scUiSyncPending === "function") scUiSyncPending()
+			if (typeof root !== "undefined" && root && root.scScopeNeedRefresh && typeof scUiPending !== "undefined" && scUiPending === 0 && !scScopePending)
+				root.scScopeNeedRefresh = false
 			let v = null
 			try { v = JSON.parse(x.responseText) } catch (e) {}
 			if (x.status === 200 && v) {
@@ -4283,6 +4298,8 @@ SERVICES_MAIN = """
 	property string scBtQueued: ""
 	property real scBtSendingAt: 0
 	property int scBtSendToken: 0
+	property var scBtSendXhr: null
+	property int scBtWriteSeq: 0
 	property bool scBtReload: false
 	function scBtLabel(name) { return name === "Master" ? "Main" : name }
 	function scBtLabels(names) { return names.map(scBtLabel) }
@@ -4299,6 +4316,10 @@ SERVICES_MAIN = """
 				return
 			}
 			root.scBtSendToken = (root.scBtSendToken || 0) + 1
+			if (typeof root.scBtSendXhr !== "undefined" && root.scBtSendXhr) {
+				try { root.scBtSendXhr.abort() } catch (e) {}
+				root.scBtSendXhr = null
+			}
 			root.scBtSending = false
 			root.scBtGen = (root.scBtGen || 0) + 1
 			if (root.scBtQueued) {
@@ -4325,10 +4346,20 @@ SERVICES_MAIN = """
 		const token = (root.scBtSendToken || 0) + 1
 		root.scBtSendToken = token
 		const x = new XMLHttpRequest()
+		root.scBtSendXhr = x
 		x.open("POST", "http://127.0.0.1:8080/v1/enginex/bluetooth?assignLayer=" + encodeURIComponent(name))
+		if (typeof x.setRequestHeader === "function") {
+			const cid = typeof scClientId !== "undefined" && scClientId ? scClientId : (typeof root !== "undefined" && root && root.scClientId ? root.scClientId : "")
+			const seq = typeof root.scBtWriteSeq !== "undefined" ? (root.scBtWriteSeq = (root.scBtWriteSeq || 0) + 1) : 0
+			if (cid && seq > 0) {
+				x.setRequestHeader("X-UI-Client-Id", cid)
+				x.setRequestHeader("X-UI-Write-Seq", String(seq))
+			}
+		}
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4 || token !== root.scBtSendToken) return
 			root.scBtSending = false
+			root.scBtSendXhr = null
 			if (root.scBtQueued) {
 				const queued = root.scBtQueued
 				root.scBtQueued = ""
@@ -4356,10 +4387,18 @@ SERVICES_MAIN = """
 			root.scBtQueued = name
 			return
 		}
+		if (root.scBtSending) {
+			root.scBtSendToken = (root.scBtSendToken || 0) + 1
+			if (typeof root.scBtSendXhr !== "undefined" && root.scBtSendXhr) {
+				try { root.scBtSendXhr.abort() } catch (e) {}
+				root.scBtSendXhr = null
+			}
+			root.scBtSending = false
+		}
 		root.scBtQueued = ""
 		scBtSend(name, gen)
 	}
-	function scCall(query, done) {
+	function scCall(query, done, onSend) {
 		if (!query && !done) {
 			if (typeof scUiSending !== "undefined" && scUiSending && Date.now() - scUiSendingAt >= 20000) {
 				scUiSendToken++
@@ -4390,6 +4429,23 @@ SERVICES_MAIN = """
 					scUiDigest = ""
 				}
 			}
+			if (typeof root !== "undefined" && root && root.scBtSending && Date.now() - (root.scBtSendingAt || 0) >= 10000) {
+				root.scBtSendToken = (root.scBtSendToken || 0) + 1
+				root.scBtGen = (root.scBtGen || 0) + 1
+				if (typeof root.scBtSendXhr !== "undefined" && root.scBtSendXhr) {
+					try { root.scBtSendXhr.abort() } catch (e) {}
+					root.scBtSendXhr = null
+				}
+				root.scBtSending = false
+				if (root.scBtQueued && typeof scBtSend === "function") {
+					const queued = root.scBtQueued
+					root.scBtQueued = ""
+					scBtSend(queued, root.scBtGen || 0)
+				} else if (typeof scBtLoad === "function") {
+					root.scBtReload = false
+					scBtLoad()
+				}
+			}
 			if (typeof scUiPending !== "undefined" && scUiPending > 0) return
 			if (!scUiPoll) {
 				scUiPoll = new XMLHttpRequest()
@@ -4413,11 +4469,11 @@ SERVICES_MAIN = """
 			scUiWriteGen++
 			if (typeof scApplyQuery === "function") scApplyQuery(query)
 			const eq = query.indexOf("=")
-			const canCoalesce = !done && eq > 0 && query.indexOf("&") < 0 && scUiQueue.length > 0 && !scUiQueue[scUiQueue.length - 1].done
+			const canCoalesce = !done && !onSend && eq > 0 && query.indexOf("&") < 0 && scUiQueue.length > 0 && !scUiQueue[scUiQueue.length - 1].done && !scUiQueue[scUiQueue.length - 1].onSend
 			if (canCoalesce && scUiQueue[scUiQueue.length - 1].query.indexOf("&") < 0 && scUiQueue[scUiQueue.length - 1].query.slice(0, eq + 1) === query.slice(0, eq + 1)) {
 				scUiQueue[scUiQueue.length - 1].query = query
 			} else {
-				scUiQueue.push({query: query, done: done})
+				scUiQueue.push({query: query, done: done, onSend: onSend})
 			}
 			scUiSyncPending()
 			scUiFlush()
@@ -4426,24 +4482,40 @@ SERVICES_MAIN = """
 		// An old source reply must not reopen real TIDAL and log out its carrier.
 		const scope = scScopePending ? "" : scScope
 		const readGen = typeof scUiWriteGen !== "undefined" ? scUiWriteGen : 0
+		const readSnapSeq = typeof scUiAppliedSeq !== "undefined" ? scUiAppliedSeq : 0
 		const startedDuringWrite = typeof scUiPending !== "undefined" && scUiPending > 0
-		if (scopeChange) scScopePending++
+		if (scopeChange) {
+			if (typeof root !== "undefined" && root) root.scScopeNeedRefresh = false
+			scScopePending++
+		}
 		const x = new XMLHttpRequest()
 		x.open(query ? "POST" : "GET", "http://127.0.0.1:8080/v1/enginex/ui" + (query ? "?" + query : ""))
+		let settled = false
 		x.onreadystatechange = function() {
-			if (x.readyState !== 4) return
+			if (x.readyState !== 4 || settled) return
+			settled = true
 			if (scopeChange) scScopePending--
 			if (x.status !== 200) {
 				if (scopeChange) {
 					if (scope !== scScope) scOpen(scScope)
-					else { scUiDigest = ""; scCall("", function() {}) }
+					else {
+						scUiDigest = ""
+						if (typeof scUiPending !== "undefined" && scUiPending > 0) {
+							if (typeof root !== "undefined" && root) root.scScopeNeedRefresh = true
+						} else {
+							scCall("", function() {})
+						}
+					}
 				}
 				return
 			}
 			const reply = JSON.parse(x.responseText)
-			if (scope !== scScope || scScopePending) delete reply.scope
-			const freshRead = !startedDuringWrite && (typeof scUiPending === "undefined" || scUiPending === 0) && (typeof scUiWriteGen === "undefined" || readGen === scUiWriteGen)
+			const scopeStripped = scope !== scScope || scScopePending > 0
+			if (scopeStripped) delete reply.scope
+			const freshForCallback = (typeof scUiWriteGen === "undefined" || readGen === scUiWriteGen) && (typeof scUiAppliedSeq === "undefined" || readSnapSeq === scUiAppliedSeq)
+			const freshRead = !startedDuringWrite && (typeof scUiPending === "undefined" || scUiPending === 0) && freshForCallback
 			if (!reply.fxSelectorReady && freshRead) {
+				if (typeof scUiAppliedSeq !== "undefined") scUiAppliedSeq++
 				const prevScope = scScope
 				const wasLoaded = typeof scUiLoaded !== "undefined" && scUiLoaded
 				const wasIn = wasLoaded && prevScope && prevScope !== "tidal" && typeof scLoggedIn !== "undefined" && Array.isArray(scLoggedIn) ? scLoggedIn.indexOf(prevScope) >= 0 : null
@@ -4463,13 +4535,14 @@ SERVICES_MAIN = """
 						scEnterTimer.start()
 					}
 				}
-				if (!scScopePending && typeof x.getResponseHeader === "function") {
+				if (!scopeStripped && !scScopePending && typeof x.getResponseHeader === "function") {
 					const dig = x.getResponseHeader("X-UI-Digest") || ""
 					if (dig) { scUiDigest = dig; scUiAppliedAt = Date.now() }
 				}
 			}
-			if (done) done(reply)
+			if (done) done(reply, freshForCallback)
 		}
+		if (onSend) onSend()
 		x.send()
 	}
 	property bool scUsbPreparing: false
@@ -4510,6 +4583,10 @@ SERVICES_MAIN = """
 	property real scUiPollAt: 0
 	property string scUiDigest: ""
 	property real scUiAppliedAt: 0
+	property string scClientId: "qml-" + Date.now() + "-" + Math.floor(Math.random() * 1000000)
+	property int scUiWriteSeq: 0
+	property int scUiAppliedSeq: 0
+	property bool scScopeNeedRefresh: false
 	property int scUiWriteGen: 0
 	property int scUiPollGen: 0
 	property int scUiPending: 0
@@ -4607,6 +4684,14 @@ SERVICES_MAIN = """
 		const x = new XMLHttpRequest()
 		scUiSendXhr = x
 		x.open("POST", "http://127.0.0.1:8080/v1/enginex/ui?" + item.query)
+		if (typeof x.setRequestHeader === "function") {
+			const cid = typeof scClientId !== "undefined" && scClientId ? scClientId : ""
+			const seq = typeof scUiWriteSeq !== "undefined" ? ++scUiWriteSeq : 0
+			if (cid && seq > 0) {
+				x.setRequestHeader("X-UI-Client-Id", cid)
+				x.setRequestHeader("X-UI-Write-Seq", String(seq))
+			}
+		}
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4 || token !== scUiSendToken) return
 			scUiSending = false
@@ -4617,12 +4702,14 @@ SERVICES_MAIN = """
 				scUiHadError = false
 				scUiWriteGen++
 				scUiSyncPending()
+				if (typeof root !== "undefined" && root && root.scScopeNeedRefresh) root.scScopeNeedRefresh = false
 				scUiDigest = ""
 				scCall("")
 				return
 			}
 			const reply = JSON.parse(x.responseText)
-			if (scope !== scScope || scScopePending) delete reply.scope
+			const scopeStripped = scope !== scScope || scScopePending > 0
+			if (scopeStripped) delete reply.scope
 			if (reply.ledBrightness !== undefined && typeof scLedBrightnessSaved !== "undefined") {
 				const confirmedBrt = parseInt(reply.ledBrightness) || 100
 				if (scLedBrightnessSaved !== confirmedBrt) {
@@ -4632,7 +4719,7 @@ SERVICES_MAIN = """
 				}
 			}
 			if (scUiQueue.length > 0) {
-				if (item.done) item.done(reply)
+				if (item.done) item.done(reply, false)
 				scUiFlush()
 				return
 			}
@@ -4640,6 +4727,7 @@ SERVICES_MAIN = """
 			scUiSyncPending()
 			if (!reply.fxSelectorReady && scUiPending === 0 && gen === scUiWriteGen) {
 				scUiWriteGen++
+				if (typeof scUiAppliedSeq !== "undefined") scUiAppliedSeq++
 				const prevScope = scScope
 				const wasLoaded = typeof scUiLoaded !== "undefined" && scUiLoaded
 				const wasIn = wasLoaded && prevScope && prevScope !== "tidal" && typeof scLoggedIn !== "undefined" && Array.isArray(scLoggedIn) ? scLoggedIn.indexOf(prevScope) >= 0 : null
@@ -4659,13 +4747,19 @@ SERVICES_MAIN = """
 						scEnterTimer.start()
 					}
 				}
-				if (!scScopePending && typeof x.getResponseHeader === "function") {
+				if (!scopeStripped && !scScopePending && typeof x.getResponseHeader === "function") {
 					const dig = x.getResponseHeader("X-UI-Digest") || ""
 					if (dig) { scUiDigest = dig; scUiAppliedAt = Date.now() }
 				}
 			}
-			if (item.done) item.done(reply)
+			if (item.done) item.done(reply, true)
+			if (scUiPending === 0 && typeof root !== "undefined" && root && root.scScopeNeedRefresh && !scScopePending) {
+				root.scScopeNeedRefresh = false
+				scUiDigest = ""
+				scCall("")
+			}
 		}
+		if (item.onSend) item.onSend()
 		x.send()
 	}
 	function scUiPollReply() {
@@ -4678,6 +4772,7 @@ SERVICES_MAIN = """
 		const prevScope = scScope
 		const wasLoaded = typeof scUiLoaded !== "undefined" && scUiLoaded
 		const wasIn = wasLoaded && prevScope && prevScope !== "tidal" && Array.isArray(scLoggedIn) ? scLoggedIn.indexOf(prevScope) >= 0 : null
+		if (typeof scUiAppliedSeq !== "undefined") scUiAppliedSeq++
 		scApply(JSON.parse(scUiPoll.responseText))
 		if (typeof scLoginOpen !== "undefined" && scLoginOpen && typeof scLoggedIn !== "undefined" && Array.isArray(scLoggedIn) && scLoggedIn.indexOf(scLoginOpen) >= 0 && typeof scSources !== "undefined" && Array.isArray(scSources) && scSources.indexOf(scLoginOpen) >= 0) {
 			const target = scLoginOpen
@@ -5004,7 +5099,16 @@ SERVICES_MAIN = """
 		const target = root.scLoginOpen
 		scLogin = ""
 		root.scLoginOpen = ""
-		scCall("", function(reply) {
+		scCall("", function(reply, fresh) {
+			const isFresh = fresh !== false
+			if (!isFresh) {
+				if (target && scSources.indexOf(target) >= 0 && scLoggedIn.indexOf(target) >= 0) {
+					scOpen(target)
+					return
+				}
+				if (target && typeof scUiPending !== "undefined" && scUiPending > 0) root.scLoginOpen = target
+				return
+			}
 			const sources = reply && Array.isArray(reply.sources) ? reply.sources : scSources
 			const loggedIn = reply && Array.isArray(reply.loggedIn) ? reply.loggedIn : scLoggedIn
 			if (reply && Array.isArray(reply.loggedIn) && (typeof scSameItems !== "function" || !scSameItems(scLoggedIn, reply.loggedIn))) scLoggedIn = reply.loggedIn

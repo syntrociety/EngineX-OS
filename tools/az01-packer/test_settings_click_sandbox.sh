@@ -195,16 +195,52 @@ class Handler(http.server.BaseHTTPRequestHandler):
 ThreadedHTTP(("127.0.0.1", 8080), Handler).serve_forever()
 PY
 http_pid=$!
+dbus_started=0
 dbus_pid=""
 cleanup() {
-    [ -n "$dbus_pid" ] && kill "$dbus_pid" 2>/dev/null || true
+    local rc=$?
+    local dbus_err=0
+    if [ "$dbus_started" = 1 ]; then
+        if [ -z "$dbus_pid" ]; then
+            echo "E4SBX FAIL|$board|dbus_cleanup_pid_lost|" >&2
+            dbus_err=1
+        else
+            kill "$dbus_pid" 2>/dev/null || true
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+                if [ ! -e "$R/proc/$dbus_pid/stat" ]; then break; fi
+                local st
+                st=$(awk '{print $3}' "$R/proc/$dbus_pid/stat" 2>/dev/null || true)
+                if [ "$st" = Z ]; then break; fi
+                sleep 0.05
+            done
+            if [ -e "$R/proc/$dbus_pid/stat" ]; then
+                local st
+                st=$(awk '{print $3}' "$R/proc/$dbus_pid/stat" 2>/dev/null || true)
+                if [ -n "$st" ] && [ "$st" != Z ]; then
+                    kill -9 "$dbus_pid" 2>/dev/null || true
+                    echo "E4SBX FAIL|$board|dbus_cleanup_still_live=$dbus_pid|" >&2
+                    dbus_err=1
+                fi
+            fi
+        fi
+    fi
     kill "$http_pid" 2>/dev/null || true
     wait "$http_pid" 2>/dev/null || true
+    if [ "$dbus_err" != 0 ]; then
+        [ "$rc" -ne 0 ] && exit "$rc"
+        exit 1
+    fi
+    return "$rc"
 }
 trap cleanup EXIT
 
+dbus_started=1
 dbus_pid=$(chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile --print-pid=1 3>&- 4>&- 2>"$W/$board-dbus.log" || true)
 dbus_pid=${dbus_pid%%[!0-9]*}
+if [ -z "$dbus_pid" ] || ! kill -0 "$dbus_pid" 2>/dev/null; then
+    echo "E4SBX FAIL|$board|dbus_pid_unusable=$dbus_pid|" >&2
+    exit 1
+fi
 
 log="$W/$board-engine.log"
 timeout --kill-after=5s 45s chroot "$R" /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home \

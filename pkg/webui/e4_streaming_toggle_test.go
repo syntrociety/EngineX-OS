@@ -1,11 +1,15 @@
 package webui
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -88,5 +92,156 @@ console.log(JSON.stringify({queries, afterFirst, afterSecond: scSources}));
 		if i == 1 && (slices.Contains(after.Sources, "soundcloud") || slices.Contains(after.Sources, "deezer")) {
 			t.Fatalf("final persisted sources still contain toggled-off service: %v", after.Sources)
 		}
+	}
+}
+
+// TestE4LateCancelledSave verifies that a timed-out/cancelled settings POST held before handler
+// entry cannot overwrite a newer acknowledged setting once released.
+func TestE4LateCancelledSave(t *testing.T) {
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	entered, release, applied := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Query().Get("ledBrightness") == "80" {
+			close(entered)
+			<-release
+			defer close(applied)
+		}
+		s.ServeHTTP(w, r)
+	}))
+	defer endpoint.Close()
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	old, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.URL+"/v1/enginex/ui?ledBrightness=80", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldDone := make(chan error, 1)
+	go func() {
+		res, err := endpoint.Client().Do(old)
+		if res != nil {
+			res.Body.Close()
+		}
+		oldDone <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first POST did not arrive")
+	}
+	cancel()
+	if err := <-oldDone; err == nil {
+		t.Fatal("first POST was not cancelled")
+	}
+	code, saved := uiPost(t, endpoint.URL, "ledBrightness=60")
+	if code != http.StatusOK || saved.LedBrightness != 60 {
+		t.Fatalf("replacement: %d, %d", code, saved.LedBrightness)
+	}
+	close(release)
+	released = true
+	select {
+	case <-applied:
+	case <-time.After(3 * time.Second):
+		t.Fatal("old handler did not finish")
+	}
+	var final uiSettings
+	tidalGet(t, endpoint.URL, "/v1/enginex/ui", http.StatusOK, &final)
+	if final.LedBrightness != 60 {
+		t.Fatalf("new value 60 was acknowledged; GET after the expired handler returned %d", final.LedBrightness)
+	}
+}
+
+// TestE4WriteSeqRejectsStaleWrites verifies out-of-order X-UI-Client-Id / X-UI-Write-Seq POSTs
+// are rejected with 409 Conflict across /v1/enginex/ui, /v1/enginex/bluetooth, and /v1/enginex/tunnel
+// without overwriting newer committed values, while unheadered callers remain unaffected and
+// client tracking stays bounded at 64 entries.
+func TestE4WriteSeqRejectsStaleWrites(t *testing.T) {
+	asDeck(t, "inmusic,jc11")
+
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+
+	postWithSeq := func(path, body, clientID string, seq int) int {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if clientID != "" {
+			req.Header.Set("X-UI-Client-Id", clientID)
+			req.Header.Set("X-UI-Write-Seq", strconv.Itoa(seq))
+		}
+		res, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		return res.StatusCode
+	}
+
+	// 1. /v1/enginex/ui: seq=2 commits ledBrightness=60; delayed seq=1 (ledBrightness=80) returns 409.
+	if code := postWithSeq("/v1/enginex/ui?ledBrightness=60", "", "qml-a", 2); code != http.StatusOK {
+		t.Fatalf("ui seq=2 status=%d, want 200", code)
+	}
+	if code := postWithSeq("/v1/enginex/ui?ledBrightness=80", "", "qml-a", 1); code != http.StatusConflict {
+		t.Fatalf("ui stale seq=1 status=%d, want 409", code)
+	}
+	if code := postWithSeq("/v1/enginex/ui?ledBrightness=80", "", "qml-a", 2); code != http.StatusConflict {
+		t.Fatalf("ui duplicate seq=2 status=%d, want 409", code)
+	}
+	var ui uiSettings
+	tidalGet(t, srv.URL, "/v1/enginex/ui", http.StatusOK, &ui)
+	if ui.LedBrightness != 60 {
+		t.Fatalf("ui ledBrightness=%d after stale seq, want 60", ui.LedBrightness)
+	}
+	// Unheadered caller still succeeds (backwards compatibility).
+	if code := postWithSeq("/v1/enginex/ui?ledBrightness=40", "", "", 0); code != http.StatusOK {
+		t.Fatalf("ui unheadered status=%d, want 200", code)
+	}
+	// Bounded client map eviction (64 entries): 64 newer clients evict qml-a so qml-a seq=1 succeeds again.
+	for i := 0; i < 64; i++ {
+		if code := postWithSeq("/v1/enginex/ui?autoGain=0", "", "client-"+strconv.Itoa(i), 1); code != http.StatusOK {
+			t.Fatalf("eviction write %d status=%d, want 200", i, code)
+		}
+	}
+	if code := postWithSeq("/v1/enginex/ui?autoGain=0", "", "qml-a", 1); code != http.StatusOK {
+		t.Fatalf("evicted client qml-a seq=1 status=%d, want 200 (proves 64-entry bound)", code)
+	}
+
+	// 2. /v1/enginex/bluetooth: seq=2 commits Headphones; stale seq=1 (Booth) returns 409.
+	if code := postWithSeq("/v1/enginex/bluetooth?assignLayer=Headphones", "", "qml-bt", 2); code != http.StatusOK {
+		t.Fatalf("bt seq=2 status=%d, want 200", code)
+	}
+	if code := postWithSeq("/v1/enginex/bluetooth?assignLayer=Booth", "", "qml-bt", 1); code != http.StatusConflict {
+		t.Fatalf("bt stale seq=1 status=%d, want 409", code)
+	}
+	var bt bluetoothStatus
+	tidalGet(t, srv.URL, "/v1/enginex/bluetooth", http.StatusOK, &bt)
+	if bt.AssignLayer != "Headphones" {
+		t.Fatalf("bt assignLayer=%q after stale seq, want Headphones", bt.AssignLayer)
+	}
+
+	// 3. /v1/enginex/tunnel: seq=2 commits enabled=false; stale seq=1 (enabled=true) returns 409.
+	if code := postWithSeq("/v1/enginex/tunnel", `{"enabled":false}`, "qml-tun", 2); code != http.StatusOK {
+		t.Fatalf("tunnel seq=2 status=%d, want 200", code)
+	}
+	if code := postWithSeq("/v1/enginex/tunnel", `{"enabled":true}`, "qml-tun", 1); code != http.StatusConflict {
+		t.Fatalf("tunnel stale seq=1 status=%d, want 409", code)
+	}
+	var tun TunnelStatus
+	tidalGet(t, srv.URL, "/v1/enginex/tunnel", http.StatusOK, &tun)
+	if tun.Enabled {
+		t.Fatalf("tunnel enabled=true after stale seq, want false")
 	}
 }

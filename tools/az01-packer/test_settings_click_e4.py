@@ -689,6 +689,64 @@ assert.notEqual(scScope, 'spotify', 'older QR GET must not open provider revoked
 """)
 
     @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_older_poll_before_newer_qr_result(self):
+        run_node(self._round2_js_harness() + """
+scLoginOpen = 'spotify';
+scLogin = 'spotify';
+scCall('');
+const oldPoll = reqs.at(-1);
+scLoginDone();
+const loginRead = reqs.at(-1);
+oldPoll.finish({sources: ['spotify'], loggedIn: []}, 'pre-login');
+loginRead.finish({sources: ['spotify'], loggedIn: ['spotify']}, 'signed-in');
+scCall('');
+reqs.at(-1).finish({sources: ['spotify'], loggedIn: ['spotify']}, 'signed-in');
+assert.deepEqual(scLoggedIn, ['spotify']);
+assert.equal(scScope, 'spotify', 'successful login never opened its selected source');
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_newer_source_choice_wins_over_qr_callback(self):
+        run_node(self._round2_js_harness() + """
+scSources = ['spotify', 'deezer'];
+scLoggedIn = ['deezer'];
+scLoginOpen = 'spotify';
+scLogin = 'spotify';
+scLoginDone();
+const oldLogin = reqs.at(-1);
+scOpen('deezer');
+scCall('scope=deezer', () => {});
+reqs.at(-1).finish({scope: 'deezer', sources: ['spotify', 'deezer'], loggedIn: ['spotify', 'deezer']}, 'new-choice');
+oldLogin.finish({sources: ['spotify', 'deezer'], loggedIn: ['spotify', 'deezer']}, 'old-login');
+assert.equal(scScope, 'deezer', 'QR completion overwrote a newer selected source');
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_stripped_ack_does_not_adopt_its_digest(self):
+        run_node(self._round2_js_harness() + """
+// 1. scUiFlush must not cache digest when reply.scope was stripped.
+scScope = 'deezer';
+scCall('masterLimiter=1');
+const older = reqs.at(-1);
+scOpen('spotify');
+scCall('scope=spotify', () => {});
+reqs.at(-1).finish({scope: 'spotify', masterLimiter: true}, 'new-scope');
+older.finish({scope: 'deezer', masterLimiter: true}, 'stripped-scope');
+assert.equal(scScope, 'spotify');
+assert.notEqual(scUiDigest, 'stripped-scope', 'scUiFlush cached the digest of a partially applied snapshot');
+
+// 2. scCall callback GET must not cache digest when reply.scope was stripped.
+scScope = 'deezer';
+scUiDigest = 'before-get';
+scCall('', () => {});
+const cbGet = reqs.at(-1);
+scScope = 'spotify';
+cbGet.finish({scope: 'deezer', masterLimiter: true}, 'stripped-get-digest');
+assert.equal(scScope, 'spotify');
+assert.notEqual(scUiDigest, 'stripped-get-digest', 'scCall cached the digest of a scope-stripped GET snapshot');
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
     def test_rejected_scope_recovers_after_overlapping_setting(self):
         run_node(self._round2_js_harness() + """
 scScope = 'deezer';

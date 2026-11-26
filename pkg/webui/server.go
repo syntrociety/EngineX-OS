@@ -124,6 +124,8 @@ type Server struct {
 
 	uiWriteSeq     writeSeqTracker
 	btWriteSeq     writeSeqTracker
+	sdHighSpeedGen uint64
+	broadcastGen   uint64
 	tunnelWriteMu  sync.Mutex
 	tunnelWriteSeq writeSeqTracker
 

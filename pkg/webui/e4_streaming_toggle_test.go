@@ -3,14 +3,17 @@ package webui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -243,5 +246,161 @@ func TestE4WriteSeqRejectsStaleWrites(t *testing.T) {
 	tidalGet(t, srv.URL, "/v1/enginex/tunnel", http.StatusOK, &tun)
 	if tun.Enabled {
 		t.Fatalf("tunnel enabled=true after stale seq, want false")
+	}
+}
+
+// TestR3SDCompletionAfterNewerSave verifies that an older SD high-speed helper failing or
+// completing after a newer acknowledged write never rolls back the newer setting or overrides
+// a newer broadcast preference.
+func TestR3SDCompletionAfterNewerSave(t *testing.T) {
+	asDeck(t, "inmusic,jp07")
+	for _, mode := range []string{"failed helper rollback", "successful helper then broadcast"} {
+		t.Run(mode, func(t *testing.T) {
+			entered, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			resume := func() { once.Do(func() { close(release) }) }
+			cfg := Config{
+				UIDir: t.TempDir(), StateDir: t.TempDir(), SDHighSpeedRunDir: t.TempDir(),
+				ApplySDHighSpeed: func(bool, bool) (bool, error) {
+					close(entered)
+					<-release
+					if mode == "failed helper rollback" {
+						return false, errors.New("fixture SD failure")
+					}
+					return false, nil
+				},
+			}
+			srv := New(cfg, nil)
+			defer srv.Close()
+			handled := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("X-UI-Write-Seq") == "1" {
+					defer close(handled)
+				}
+				srv.ServeHTTP(w, r)
+			}))
+			defer server.Close()
+			defer resume()
+			post := func(ctx context.Context, query, seq string) (int, error) {
+				req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/enginex/ui?"+query, nil)
+				if err != nil {
+					return 0, err
+				}
+				req.Header.Set("X-UI-Client-Id", "review-r3")
+				req.Header.Set("X-UI-Write-Seq", seq)
+				resp, err := server.Client().Do(req)
+				if err != nil {
+					return 0, err
+				}
+				defer resp.Body.Close()
+				return resp.StatusCode, nil
+			}
+			first := "sdHighSpeed=1"
+			next := "ledBrightness=60"
+			if mode == "successful helper then broadcast" {
+				first += "&broadcast=1"
+				next = "broadcast=0"
+			}
+			old, cancelOld := context.WithCancel(context.Background())
+			defer cancelOld()
+			closed := make(chan int, 1)
+			go func() { code, _ := post(old, first, "1"); closed <- code }()
+			select {
+			case <-entered:
+			case <-time.After(3 * time.Second):
+				t.Fatal("SD helper never started")
+			}
+			cancelOld()
+			if code := <-closed; code != 0 {
+				t.Fatalf("expired client received response %d", code)
+			}
+			if code, err := post(context.Background(), next, "2"); code != 200 || err != nil {
+				t.Fatalf("new write: status %d, %v", code, err)
+			}
+			var ack uiSettings
+			tidalGet(t, server.URL, "/v1/enginex/ui", 200, &ack)
+			if mode == "failed helper rollback" && ack.LedBrightness != 60 {
+				t.Fatal("missing brightness ACK")
+			}
+			if mode == "successful helper then broadcast" && ack.BroadcastEnabled {
+				t.Fatal("missing off ACK")
+			}
+			resume()
+			select {
+			case <-handled:
+			case <-time.After(3 * time.Second):
+				t.Fatal("expired handler never finished")
+			}
+			var final uiSettings
+			tidalGet(t, server.URL, "/v1/enginex/ui", 200, &final)
+			if mode == "failed helper rollback" && final.LedBrightness != 60 {
+				t.Errorf("acknowledged 60; after rollback GET returned %d", final.LedBrightness)
+			}
+			if mode == "successful helper then broadcast" && final.BroadcastEnabled {
+				t.Error("acknowledged broadcast off; after old helper GET returned on")
+			}
+		})
+	}
+}
+
+type r3ObservedContext struct {
+	context.Context
+	observe func(error) error
+}
+
+func (c r3ObservedContext) Err() error { return c.observe(c.Context.Err()) }
+
+// TestR3CancelledTunnelWhileWaitingForManager verifies that a tunnel POST cancelled while
+// waiting on TunnelManager.mu does not mutate or persist tunnel state once the lock is released.
+func TestR3CancelledTunnelWhileWaitingForManager(t *testing.T) {
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	manager := s.TunnelManager()
+	manager.mu.Lock()
+	manager.enabled = true
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	checked := make(chan struct{})
+	var once sync.Once
+	observed := r3ObservedContext{ctx, func(err error) error { once.Do(func() { close(checked) }); return err }}
+	req := httptest.NewRequest(http.MethodPost, "/v1/enginex/tunnel", strings.NewReader(`{"enabled":false}`)).WithContext(observed)
+	done := make(chan struct{})
+	go func() { defer close(done); s.tunnelPost(httptest.NewRecorder(), req) }()
+	select {
+	case <-checked:
+	case <-time.After(3 * time.Second):
+		manager.mu.Unlock()
+		<-done
+		t.Fatal("did not reach first context check")
+	}
+	cancel()
+	manager.mu.Unlock()
+	<-done
+	if !manager.Status("").Enabled {
+		t.Fatal("cancelled request disabled tunnel after manager unlock")
+	}
+}
+
+// TestR3CancelledVerboseWriteRemainsConsistent verifies that cancellation around verboseLog
+// never leaves logging.ini enabled while settings.conf keeps VerboseLog false.
+func TestR3CancelledVerboseWriteRemainsConsistent(t *testing.T) {
+	path := verboseLogPath
+	verboseLogPath = filepath.Join(t.TempDir(), "logging.ini")
+	defer func() { verboseLogPath = path }()
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	live := r3ObservedContext{ctx, func(err error) error {
+		if _, statErr := os.Stat(verboseLogPath); statErr == nil {
+			cancel()
+		}
+		return ctx.Err()
+	}}
+	req := httptest.NewRequest(http.MethodPost, "/v1/enginex/ui?verboseLog=1", nil).WithContext(live)
+	s.uiUpdate(httptest.NewRecorder(), req)
+	_, err := os.Stat(verboseLogPath)
+	if s.loadUI().VerboseLog != (err == nil) {
+		t.Fatal("logging.ini is enabled while the persisted UI setting is off")
 	}
 }

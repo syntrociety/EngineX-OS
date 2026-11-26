@@ -481,6 +481,7 @@ TIDAL_OPEN_530 = """	function scTidalProvider() {
 			return
 		}
 		root.scLoginOpen = ""
+		if (typeof root !== "undefined" && root) root.scChoiceGen = (root.scChoiceGen || 0) + 1
 		scAskedAt = Date.now()
 		scScope = id // before Engine's TIDAL client can raise a prompt; scApply confirms it
 		if (id !== "tidal") scTidalLoginPending = false
@@ -514,6 +515,7 @@ TIDAL_OPEN_504 = """
 			return
 		}
 		root.scLoginOpen = ""
+		if (typeof root !== "undefined" && root) root.scChoiceGen = (root.scChoiceGen || 0) + 1
 		scAskedAt = Date.now()
 		scScope = id // before Engine's TIDAL client can raise a prompt; scApply confirms it
 		if (scScopePending) return
@@ -4459,6 +4461,12 @@ SERVICES_MAIN = """
 			scUiPollAt = Date.now()
 			scUiPollScope = scScopePending ? "" : scScope
 			if (typeof scUiWriteGen !== "undefined") scUiPollGen = scUiWriteGen
+			const _rp = typeof root !== "undefined" && root ? root : null
+			if (_rp) {
+				const _ps = (_rp.scUiReqSeq || 0) + 1
+				_rp.scUiReqSeq = _ps
+				_rp.scUiPollStartSeq = _ps
+			}
 			scUiPoll.open("GET", "http://127.0.0.1:8080/v1/enginex/ui")
 			scUiPoll.send()
 			return
@@ -4481,11 +4489,17 @@ SERVICES_MAIN = """
 		}
 		// An old source reply must not reopen real TIDAL and log out its carrier.
 		const scope = scScopePending ? "" : scScope
+		const _r = typeof root !== "undefined" && root ? root : null
 		const readGen = typeof scUiWriteGen !== "undefined" ? scUiWriteGen : 0
-		const readSnapSeq = typeof scUiAppliedSeq !== "undefined" ? scUiAppliedSeq : 0
+		const reqStartSeq = _r ? ((_r.scUiReqSeq || 0) + 1) : 0
+		if (_r) _r.scUiReqSeq = reqStartSeq
 		const startedDuringWrite = typeof scUiPending !== "undefined" && scUiPending > 0
 		if (scopeChange) {
-			if (typeof root !== "undefined" && root) root.scScopeNeedRefresh = false
+			if (_r) {
+				_r.scScopeNeedRefresh = false
+				_r.scChoiceGen = (_r.scChoiceGen || 0) + 1
+				_r.scLoginOpen = ""
+			}
 			scScopePending++
 		}
 		const x = new XMLHttpRequest()
@@ -4501,7 +4515,7 @@ SERVICES_MAIN = """
 					else {
 						scUiDigest = ""
 						if (typeof scUiPending !== "undefined" && scUiPending > 0) {
-							if (typeof root !== "undefined" && root) root.scScopeNeedRefresh = true
+							if (_r) _r.scScopeNeedRefresh = true
 						} else {
 							scCall("", function() {})
 						}
@@ -4512,9 +4526,10 @@ SERVICES_MAIN = """
 			const reply = JSON.parse(x.responseText)
 			const scopeStripped = scope !== scScope || scScopePending > 0
 			if (scopeStripped) delete reply.scope
-			const freshForCallback = (typeof scUiWriteGen === "undefined" || readGen === scUiWriteGen) && (typeof scUiAppliedSeq === "undefined" || readSnapSeq === scUiAppliedSeq)
+			const freshForCallback = (typeof scUiWriteGen === "undefined" || readGen === scUiWriteGen) && (!_r || reqStartSeq >= (_r.scUiAppliedStartSeq || 0))
 			const freshRead = !startedDuringWrite && (typeof scUiPending === "undefined" || scUiPending === 0) && freshForCallback
 			if (!reply.fxSelectorReady && freshRead) {
+				if (_r && reqStartSeq > (_r.scUiAppliedStartSeq || 0)) _r.scUiAppliedStartSeq = reqStartSeq
 				if (typeof scUiAppliedSeq !== "undefined") scUiAppliedSeq++
 				const prevScope = scScope
 				const wasLoaded = typeof scUiLoaded !== "undefined" && scUiLoaded
@@ -4586,6 +4601,10 @@ SERVICES_MAIN = """
 	property string scClientId: "qml-" + Date.now() + "-" + Math.floor(Math.random() * 1000000)
 	property int scUiWriteSeq: 0
 	property int scUiAppliedSeq: 0
+	property int scUiReqSeq: 0
+	property int scUiAppliedStartSeq: 0
+	property int scUiPollStartSeq: 0
+	property int scChoiceGen: 0
 	property bool scScopeNeedRefresh: false
 	property int scUiWriteGen: 0
 	property int scUiPollGen: 0
@@ -4680,6 +4699,9 @@ SERVICES_MAIN = """
 		scUiSyncPending()
 		const token = ++scUiSendToken
 		const gen = scUiWriteGen
+		const _rf = typeof root !== "undefined" && root ? root : null
+		const reqStartSeq = _rf ? ((_rf.scUiReqSeq || 0) + 1) : 0
+		if (_rf) _rf.scUiReqSeq = reqStartSeq
 		const scope = scScopePending ? "" : scScope
 		const x = new XMLHttpRequest()
 		scUiSendXhr = x
@@ -4727,6 +4749,7 @@ SERVICES_MAIN = """
 			scUiSyncPending()
 			if (!reply.fxSelectorReady && scUiPending === 0 && gen === scUiWriteGen) {
 				scUiWriteGen++
+				if (_rf && reqStartSeq > (_rf.scUiAppliedStartSeq || 0)) _rf.scUiAppliedStartSeq = reqStartSeq
 				if (typeof scUiAppliedSeq !== "undefined") scUiAppliedSeq++
 				const prevScope = scScope
 				const wasLoaded = typeof scUiLoaded !== "undefined" && scUiLoaded
@@ -4737,6 +4760,8 @@ SERVICES_MAIN = """
 					scLogin = ""
 					scLoginOpen = ""
 					scOpen(target)
+				} else if (typeof scLoginOpen !== "undefined" && scLoginOpen && (typeof scLogin === "undefined" || !scLogin)) {
+					scLoginOpen = ""
 				} else if (wasIn !== null && scScope === prevScope && typeof scLoggedIn !== "undefined" && Array.isArray(scLoggedIn) && (scLoggedIn.indexOf(prevScope) >= 0) !== wasIn) {
 					const nowIn = !wasIn
 					if (nowIn && typeof scLogin !== "undefined" && scLogin === prevScope) scLogin = ""
@@ -4765,6 +4790,9 @@ SERVICES_MAIN = """
 	function scUiPollReply() {
 		if (scUiPoll.readyState !== 4 || scUiPoll.status !== 200 || scScopePending || scUiPollScope !== scScope) return
 		if (typeof scUiPending !== "undefined" && (scUiPending > 0 || scUiPollGen !== scUiWriteGen)) return
+		const _rp = typeof root !== "undefined" && root ? root : null
+		const pollStartSeq = _rp ? (_rp.scUiPollStartSeq || 0) : 0
+		if (_rp && pollStartSeq > 0 && pollStartSeq < (_rp.scUiAppliedStartSeq || 0)) return
 		// Unchanged settings (stream-sync's digest): skip the parse and the writes,
 		// but re-apply every 30 s in case a local change raced a reply.
 		const digest = scUiPoll.getResponseHeader("X-UI-Digest") || "", now = Date.now()
@@ -4772,6 +4800,7 @@ SERVICES_MAIN = """
 		const prevScope = scScope
 		const wasLoaded = typeof scUiLoaded !== "undefined" && scUiLoaded
 		const wasIn = wasLoaded && prevScope && prevScope !== "tidal" && Array.isArray(scLoggedIn) ? scLoggedIn.indexOf(prevScope) >= 0 : null
+		if (_rp && pollStartSeq > (_rp.scUiAppliedStartSeq || 0)) _rp.scUiAppliedStartSeq = pollStartSeq
 		if (typeof scUiAppliedSeq !== "undefined") scUiAppliedSeq++
 		scApply(JSON.parse(scUiPoll.responseText))
 		if (typeof scLoginOpen !== "undefined" && scLoginOpen && typeof scLoggedIn !== "undefined" && Array.isArray(scLoggedIn) && scLoggedIn.indexOf(scLoginOpen) >= 0 && typeof scSources !== "undefined" && Array.isArray(scSources) && scSources.indexOf(scLoginOpen) >= 0) {
@@ -4781,6 +4810,9 @@ SERVICES_MAIN = """
 			scOpen(target)
 			if (!scScopePending) { scUiDigest = digest; scUiAppliedAt = now }
 			return
+		}
+		if (typeof scLoginOpen !== "undefined" && scLoginOpen && (typeof scLogin === "undefined" || !scLogin)) {
+			scLoginOpen = ""
 		}
 		if (wasIn !== null && scScope === prevScope && typeof scLoggedIn !== "undefined" && Array.isArray(scLoggedIn) && (scLoggedIn.indexOf(prevScope) >= 0) !== wasIn) {
 			const nowIn = !wasIn
@@ -5097,16 +5129,23 @@ SERVICES_MAIN = """
 	}
 	function scLoginDone() {
 		const target = root.scLoginOpen
+		const startScope = scScope
+		const startChoiceGen = root.scChoiceGen || 0
 		scLogin = ""
 		root.scLoginOpen = ""
 		scCall("", function(reply, fresh) {
+			const choiceChanged = (root.scChoiceGen || 0) !== startChoiceGen || scScope !== startScope
+			if (choiceChanged) return
 			const isFresh = fresh !== false
 			if (!isFresh) {
 				if (target && scSources.indexOf(target) >= 0 && scLoggedIn.indexOf(target) >= 0) {
 					scOpen(target)
 					return
 				}
-				if (target && typeof scUiPending !== "undefined" && scUiPending > 0) root.scLoginOpen = target
+				if (target && !root.scLoginOpen && !scLogin) {
+					root.scLoginOpen = target
+					scUiDigest = ""
+				}
 				return
 			}
 			const sources = reply && Array.isArray(reply.sources) ? reply.sources : scSources

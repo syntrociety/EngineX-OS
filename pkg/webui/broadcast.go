@@ -2,6 +2,7 @@ package webui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -265,13 +266,26 @@ func (s *Server) BroadcastEnabled() bool {
 func (s *Server) SetBroadcastEnabled(on bool) error {
 	s.uiMu.Lock()
 	defer s.uiMu.Unlock()
+	s.broadcastGen++
+	return s.setBroadcastEnabledLocked(on)
+}
 
+func (s *Server) setBroadcastEnabledLocked(on bool) error {
 	cfg := s.loadBroadcastConfig()
 	cfg.Enabled = on
 	if err := providers.SaveJSON(s.broadcastConfigPath(), cfg); err != nil {
 		return err
 	}
 	return s.broadcaster().SetEnabled(on)
+}
+
+func (s *Server) setBroadcastEnabledIfCurrent(ctx context.Context, gen uint64, on bool) error {
+	s.uiMu.Lock()
+	defer s.uiMu.Unlock()
+	if (ctx != nil && ctx.Err() != nil) || s.broadcastGen != gen {
+		return nil
+	}
+	return s.setBroadcastEnabledLocked(on)
 }
 
 // RegisterBroadcastRoutes registers broadcast routes on the server's mux.

@@ -1681,10 +1681,6 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	if slices.Contains(uiServices, v.Scope) && !slices.Contains(v.Sources, v.Scope) {
 		v.Scope = ""
 	}
-	if r.Context().Err() != nil {
-		s.uiMu.Unlock()
-		return
-	}
 	err := s.saveUI(v, q.Has("prolinkShare"))
 	if err != nil && q.Has("verboseLog") {
 		_ = writeVerboseLog(previousVerbose)
@@ -1696,6 +1692,16 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			err = herr
 		}
 	}
+	needSD := err == nil && v.SdHighSpeed != prevSdHighSpeed && boardCapabilities(imagePrefix(deviceCompatible())).SDHighSpeed
+	var mySDGen, myBroadcastGen uint64
+	if needSD {
+		s.sdHighSpeedGen++
+		mySDGen = s.sdHighSpeedGen
+	}
+	if err == nil && hasBroadcast {
+		s.broadcastGen++
+		myBroadcastGen = s.broadcastGen
+	}
 	if err == nil && hasWriteSeq {
 		s.uiWriteSeq.record(clientID, writeSeq)
 	}
@@ -1704,11 +1710,14 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, err)
 		return
 	}
-	if v.SdHighSpeed != prevSdHighSpeed && boardCapabilities(imagePrefix(deviceCompatible())).SDHighSpeed {
+	if needSD {
 		if _, serr := s.applySDHighSpeed(v.SdHighSpeed); serr != nil {
 			s.uiMu.Lock()
-			v.SdHighSpeed = prevSdHighSpeed
-			_ = s.saveUI(v)
+			if s.sdHighSpeedGen == mySDGen {
+				cur := s.loadUI()
+				cur.SdHighSpeed = prevSdHighSpeed
+				_ = s.saveUI(cur)
+			}
 			s.uiMu.Unlock()
 			fail(w, 500, serr)
 			return
@@ -1722,12 +1731,12 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		s.shadow.mu.Unlock()
 	}
 	if hasBroadcast {
-		if err := s.SetBroadcastEnabled(bcastOn); err != nil {
+		if err := s.setBroadcastEnabledIfCurrent(r.Context(), myBroadcastGen, bcastOn); err != nil {
 			fail(w, 400, err)
 			return
 		}
 	}
-	if q.Get("restart") == "1" {
+	if q.Get("restart") == "1" && r.Context().Err() == nil {
 		if err := s.restartEngine(); err != nil {
 			log.Printf("stream-sync: restart Engine: %v", err)
 			fail(w, 500, errors.New("settings saved, but Engine did not restart"))

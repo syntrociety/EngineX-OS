@@ -256,7 +256,21 @@ func validTunnelToken(tok string) error {
 
 // Configure updates the tunnel state, starting or stopping cloudflared as needed.
 func (m *TunnelManager) Configure(enabled bool, token *string) error {
+	return m.ConfigureContext(context.Background(), &enabled, token)
+}
+
+// ConfigureContext updates the tunnel state like Configure, aborting without
+// mutating state if ctx is already cancelled once the manager lock is acquired.
+func (m *TunnelManager) ConfigureContext(ctx context.Context, enabled *bool, token *string) error {
 	m.mu.Lock()
+	if ctx != nil && ctx.Err() != nil {
+		m.mu.Unlock()
+		return ctx.Err()
+	}
+	nextEnabled := m.enabled
+	if enabled != nil {
+		nextEnabled = *enabled
+	}
 	nextTok := m.token
 	if token != nil {
 		nextTok = strings.TrimSpace(*token)
@@ -271,12 +285,12 @@ func (m *TunnelManager) Configure(enabled bool, token *string) error {
 	}
 	m.gen++
 	myGen := m.gen
-	m.enabled = enabled
+	m.enabled = nextEnabled
 	m.token = nextTok
 	m.publicURL = ""
 	m.lastErr = ""
 
-	if !enabled {
+	if !nextEnabled {
 		m.status = "stopped"
 		err := m.saveConfigLocked()
 		m.mu.Unlock()
@@ -570,11 +584,10 @@ func (s *Server) tunnelPost(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusConflict, errors.New("stale write sequence"))
 		return
 	}
-	enabled := mgr.Status(s.cfg.AccessToken).Enabled
-	if req.Enabled != nil {
-		enabled = *req.Enabled
-	}
-	if err := mgr.Configure(enabled, req.Token); err != nil {
+	if err := mgr.ConfigureContext(r.Context(), req.Enabled, req.Token); err != nil {
+		if r.Context().Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
 		fail(w, http.StatusBadRequest, err)
 		return
 	}

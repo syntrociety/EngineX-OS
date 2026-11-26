@@ -24,9 +24,11 @@ class Clock(BaseHTTPRequestHandler):
         deck = dict(deck=1, source="local", sourceId="local:1", master=True,
                     playing=True, bpm=240, beat=(elapsed * 4) % 4, positionMs=elapsed * 1000,
                     trackKey="test-usb-track", title="Testtrack", lightTag="warmup")
+        peer = dict(deck=2, source="peer", sourceId="peer:2", playing=False, cue=True, bpm=128,
+                    beat=0, trackKey="peer-usb-track", title="Volgende track", lightTag="peak")
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(json.dumps(dict(clockApi=True, decks=[deck])).encode())
+        self.wfile.write(json.dumps(dict(clockApi=True, decks=[deck, peer])).encode())
 
     def log_message(self, *unused):
         pass
@@ -76,6 +78,10 @@ def check_panel(tmp):
             for index, screen in enumerate(("showregie", "deckmix", "tags")):
                 js("maestroPane.screen = %d" % index)
                 app.processEvents()
+                view.requestUpdate()
+                for unused in range(6):
+                    app.processEvents()
+                    time.sleep(.02)
                 assert view.grabWindow().save("maestro-" + screen + ".png")
             js("maestroPane.command({action:'maestroStop'})")
             wait_for("!root.state.maestro.armed")

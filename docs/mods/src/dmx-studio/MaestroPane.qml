@@ -88,7 +88,7 @@ Rectangle {
                             anchors.fill: parent; anchors.margins: 18
                             Label { text: "VOLGENDE FRASEGRENS"; color: "#bbcab0" }
                             Label { text: desk.status.next || "Geen wissel"; color: desk.accent; font.pixelSize: 30; Layout.fillWidth: true; elide: Text.ElideRight }
-                            Label { text: desk.status.source || "Wacht op eenduidige lichtbron"; color: "white"; Layout.fillWidth: true; elide: Text.ElideMiddle }
+                            Label { text: desk.status.source || "Wacht op een spelend deck"; color: "white"; Layout.fillWidth: true; elide: Text.ElideMiddle }
                         }
                     }
                 }
@@ -100,7 +100,7 @@ Rectangle {
                 }
             }
             ColumnLayout {
-                Label { text: "Automatische lichtbron"; font.pixelSize: 20; color: desk.accent }
+                Label { text: "Deck voor tracktags"; font.pixelSize: 20; color: desk.accent }
                 Label { visible: !desk.decks.length; text: "Nog geen verse decks van de lokale klok."; color: "white" }
                 GridView {
                     id: deckGrid; clip: true; Layout.fillWidth: true; Layout.fillHeight: true
@@ -111,7 +111,7 @@ Rectangle {
                         color: modelData.sourceId === desk.status.source ? "#2b3822" : "#202520"
                         Column {
                             anchors.fill: parent; anchors.margins: 9; spacing: 4
-                            Label { color: "white"; font.bold: true; text: "Deck "+modelData.deck+" · "+modelData.source+(modelData.sourceId===desk.status.source ? " · LICHTBRON" : "") }
+                            Label { color: "white"; font.bold: true; text: "Deck "+modelData.deck+" · "+modelData.source+(modelData.sourceId===desk.status.source ? " · VOLGT TAGS" : "") }
                             Label { width: parent.width; elide: Text.ElideRight; color: "white"; text: modelData.title || "Track onbekend" }
                             Label { color: "#ccdbc5"; text: (modelData.cue ? "Voorbeluisteren" : modelData.playing ? "Speelt" : "Pauze")+" · "+(modelData.lightTag ? "[licht:"+modelData.lightTag+"]" : "Geen lichttag") }
                             Label { color: desk.accent; text: { var val=modelData.source==="local"?desk.midi.local:modelData.source==="peer"?desk.midi.peer:-1; return val>=0 ? "Kanaalfader "+Math.round(val*100/127)+"%" : "Kanaalfader onbekend" } }

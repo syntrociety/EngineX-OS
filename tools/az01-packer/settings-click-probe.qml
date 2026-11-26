@@ -118,15 +118,15 @@ Item {
                 // Stale poll has now returned with masterLimiter=false; setting must NOT have reverted!
                 check(root.scMasterLimiter === true && swMaster.checkedExternally === true && swMaster.checked === true, "master_limiter_survives_stale_poll")
 
-                // 4. Rapidly disable two streaming services (SoundCloud POST delayed 200ms on server).
+                // 4. Rapidly disable two streaming services while discovered rekordbox is visible (SoundCloud POST delayed 200ms).
                 swSoundCloud.parent.clicked()
                 swDeezer.parent.clicked()
-                check(root.scSources.indexOf("soundcloud") < 0 && root.scSources.indexOf("deezer") < 0, "rapid_sources_optimistic")
+                check(root.scSources.indexOf("soundcloud") < 0 && root.scSources.indexOf("deezer") < 0 && root.scSources.indexOf("rekordbox") >= 0, "rapid_sources_optimistic")
                 step = 5
                 tick.interval = 500
                 tick.start()
             } else if (step === 5) {
-                check(root.scSources.indexOf("soundcloud") < 0 && root.scSources.indexOf("deezer") < 0, "rapid_sources_both_persisted")
+                check(root.scSources.indexOf("soundcloud") < 0 && root.scSources.indexOf("deezer") < 0 && root.scSources.indexOf("rekordbox") >= 0, "rapid_sources_both_persisted")
 
                 // 5. Rapid ListEntry picks: 80% (delayed 250ms on server) then 60% (fast).
                 leLed.selected(1)

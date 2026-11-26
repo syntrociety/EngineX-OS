@@ -101,15 +101,23 @@ import hashlib, http.server, json, socketserver, sys, threading, time, urllib.pa
 
 state_file = sys.argv[1]
 lock = threading.Lock()
+configurable_sources = ["tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"]
 state = {
     "language": "en", "waveform": "denon", "quality": "flac", "neteaseMode": "official",
-    "sources": ["tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"],
+    "sources": list(configurable_sources),
     "loggedIn": [], "scope": "", "cueCountdown": True, "tracklistWaveform": True,
     "masterLimiter": False, "autoGain": False, "bpmDecimals": 2, "ledBrightness": 100,
-    "uiScale": 100, "player": True,
+    "uiScale": 100, "player": True, "rekordboxName": "Studio-Mac",
     "tunnel": {"enabled": False, "status": "stopped", "publicUrl": "", "error": ""},
 }
 get_seq = [0]
+
+def view_snap():
+    snap = json.loads(json.dumps(state))
+    # Mirror pkg/webui/ui_settings.go:999: discovered rekordbox is appended at read time, never saved.
+    snap["sources"] = list(snap["sources"]) + ["rekordbox"]
+    snap["loggedIn"] = list(snap["loggedIn"]) + ["rekordbox"]
+    return snap
 
 def persist():
     with open(state_file, "w", encoding="utf-8") as f:
@@ -137,7 +145,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         with lock:
             get_seq[0] += 1
             n = get_seq[0]
-            snap = json.loads(json.dumps(state))
+            snap = view_snap()
         # Poll #2 runs right before Master Soft Clipper click; Poll #3 runs right before Remote access click.
         if n == 2:
             time.sleep(0.40)
@@ -162,18 +170,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 snap = dict(state["tunnel"])
             self.send_json(snap, with_digest=False)
             return
-        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-        if "sources" in q and "soundcloud" not in q["sources"][0] and "deezer" in q["sources"][0]:
-            time.sleep(0.20)
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query, keep_blank_values=True)
+        if "sources" in q:
+            raw = [s for s in q["sources"][0].split(",") if s]
+            bad = [s for s in raw if s not in configurable_sources]
+            if bad:
+                self.send_json({"error": "unknown source: " + bad[0]}, code=400, with_digest=False)
+                return
+            if "soundcloud" not in raw and "deezer" in raw:
+                time.sleep(0.20)
         if "ledBrightness" in q and q["ledBrightness"][0] == "80":
             time.sleep(0.25)
         with lock:
             if "autoGain" in q: state["autoGain"] = q["autoGain"][0] == "1"
             if "masterLimiter" in q: state["masterLimiter"] = q["masterLimiter"][0] == "1"
-            if "sources" in q: state["sources"] = [s for s in q["sources"][0].split(",") if s]
+            if "sources" in q:
+                raw = [s for s in q["sources"][0].split(",") if s]
+                state["sources"] = [s for s in configurable_sources if s in raw]
             if "ledBrightness" in q: state["ledBrightness"] = int(q["ledBrightness"][0])
             persist()
-            snap = json.loads(json.dumps(state))
+            snap = view_snap()
         self.send_json(snap)
 
 ThreadedHTTP(("127.0.0.1", 8080), Handler).serve_forever()
@@ -187,8 +203,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile 3>&- 4>&- > "$W/$board-dbus.log" 2>&1 || true
-dbus_pid=$(pgrep -f "dbus-daemon.*system" || true)
+dbus_pid=$(chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile --print-pid=1 3>&- 4>&- 2>"$W/$board-dbus.log" || true)
+dbus_pid=${dbus_pid%%[!0-9]*}
 
 log="$W/$board-engine.log"
 timeout --kill-after=5s 45s chroot "$R" /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home \
@@ -204,7 +220,7 @@ board = sys.argv[2]
 checks = [
     (st["autoGain"] is True, "server_autogain_true"),
     (st["masterLimiter"] is True, "server_master_limiter_true"),
-    ("soundcloud" not in st["sources"] and "deezer" not in st["sources"], f"server_sources_both_off={st['sources']}"),
+    ("soundcloud" not in st["sources"] and "deezer" not in st["sources"] and "rekordbox" not in st["sources"], f"server_sources_both_off={st['sources']}"),
     (st["ledBrightness"] == 60, f"server_led_60={st['ledBrightness']}"),
     (st["tunnel"]["enabled"] is True, f"server_tunnel_on={st['tunnel']['enabled']}"),
 ]

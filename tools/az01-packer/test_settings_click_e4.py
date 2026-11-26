@@ -127,7 +127,7 @@ class XMLHttpRequest {{
 let scScope = '', scScopePending = 0, scUiPoll = null, scUiPollScope = '', scUiPollAt = 0, scUiDigest = '', scUiAppliedAt = 0;
 let scUiWriteGen = 0, scUiPollGen = 0, scUiPending = 0, scUiQueue = [], scUiSending = false, scUiSendingAt = 0, scUiSendToken = 0, scUiSendXhr = null, scUiHadError = false;
 let scTunnelPending = 0, scUiLoaded = true, scIsPlayerBoard = true, scConsoleLineBoard = false, scFourDeckOn = false, scHasMixer = false, scTransitionFxView = null;
-let scMasterLimiter = false, scAutoGain = false, scLedBrightness = 100, scSources = ['tidal', 'spotify'], scLoggedIn = [];
+let scMasterLimiter = false, scAutoGain = false, scLedBrightness = 100, scLedBrightnessSaved = 100, scSources = ['tidal', 'spotify'], scLoggedIn = [];
 let scFxTimeMode = 'beats', scFxTimeMs = 500, scFxMsWanted = -1;
 let scPadDelayRestarts = 0;
 const scPadBrightnessDelay = {{ restart() {{ scPadDelayRestarts++; }} }};
@@ -136,9 +136,14 @@ function scEnsureTidal() {{}}
 function scOpen(s) {{ scScope = s; }}
 function scApply(v) {{
     applyCount++;
+    if (v.loggedIn) scLoggedIn = v.loggedIn;
     if (v.masterLimiter !== undefined) scMasterLimiter = !!v.masterLimiter;
     if (v.autoGain !== undefined) scAutoGain = !!v.autoGain;
-    if (v.ledBrightness !== undefined) scLedBrightness = parseInt(v.ledBrightness) || 100;
+    if (v.ledBrightness !== undefined) {{
+        const brt = parseInt(v.ledBrightness) || 100;
+        scLedBrightness = brt;
+        scLedBrightnessSaved = brt;
+    }}
     if (v.sources) scSources = v.sources;
 }}
 {code}
@@ -173,6 +178,92 @@ assert.equal(scMasterLimiter, false, 'fresh post-write poll must still reflect e
 """
         run_node(script)
 
+        for case, action in {
+            "read_during_write": """
+scCall('masterLimiter=1');
+const write = reqs.at(-1), count = reqs.length;
+scCall('');
+const read = reqs.length > count ? reqs.at(-1) : null;
+write.finish(200, {masterLimiter: true}, 'accepted');
+if (read) read.finish(200, {masterLimiter: false}, 'old');
+assert.equal(scMasterLimiter, true, 'read during write reverted acknowledged switch');
+""",
+            "older_callback_read": """
+let callbackCount = 0;
+scCall('', () => callbackCount++);
+const read = reqs.at(-1);
+scCall('masterLimiter=1');
+reqs.at(-1).finish(200, {masterLimiter: true}, 'accepted');
+read.finish(200, {masterLimiter: false}, 'old');
+assert.equal(callbackCount, 1);
+assert.equal(scMasterLimiter, true, 'callback GET reverted acknowledged switch');
+""",
+            "hung_first_post": """
+const zero = Date.now();
+Date.now = () => zero;
+scCall('masterLimiter=1');
+const hungFirst = reqs.at(-1);
+scCall('autoGain=0');
+for (let n = 1; n <= 8; n++) {
+    Date.now = () => zero + n * 3000;
+    scCall('');
+    const x = reqs.at(-1);
+    if (x.method === 'GET' && x.readyState !== 4) x.finish(200, {autoGain: true}, 'remote');
+}
+const secondPost = reqs.find(x => x.method === 'POST' && x.url.endsWith('?autoGain=0'));
+assert.ok(secondPost, 'second tap still unsent after eight watchdog ticks');
+secondPost.finish(200, {masterLimiter: false, autoGain: false}, 'after-second');
+assert.equal(scAutoGain, false);
+assert.equal(scMasterLimiter, false);
+// Delayed reply from the timed-out first POST must never supersede newer state.
+hungFirst.finish(200, {masterLimiter: true, autoGain: true}, 'late-hung');
+assert.equal(scAutoGain, false, 'delayed reply from timed-out POST must be ignored');
+assert.equal(scMasterLimiter, false, 'delayed reply from timed-out POST must be ignored');
+""",
+            "hung_single_post_reconciles_state": """
+const zero = Date.now();
+Date.now = () => zero;
+scCall('masterLimiter=1');
+const hungOnly = reqs.at(-1);
+assert.equal(scMasterLimiter, true);
+for (let n = 1; n <= 7; n++) {
+    Date.now = () => zero + n * 3000;
+    scCall('');
+}
+const reconGet = reqs.at(-1);
+assert.equal(reconGet.method, 'GET', 'watchdog must issue a fresh GET when no queued POST remains');
+reconGet.finish(200, {masterLimiter: false}, 'reconciled');
+assert.equal(scMasterLimiter, false, 'reconciled GET restores confirmed server state');
+hungOnly.finish(200, {masterLimiter: true}, 'late-hung');
+assert.equal(scMasterLimiter, false, 'late timed-out POST must not override reconciled state');
+""",
+            "login_on_write_reply": """
+globalThis.scLoginOpen = 'spotify';
+globalThis.scLogin = 'spotify';
+scCall('masterLimiter=1');
+reqs.at(-1).finish(200, {masterLimiter: true, loggedIn: ['spotify']}, 'login');
+scCall('');
+reqs.at(-1).finish(200, {masterLimiter: true, loggedIn: ['spotify']}, 'login');
+assert.equal(scScope, 'spotify', 'cached POST digest skipped login auto-open');
+assert.equal(scLoginOpen, '');
+assert.equal(scLogin, '');
+""",
+            "qr_callback_during_write": extract_function(main, "scLoginDone") + """
+globalThis.root = {scLoginOpen: 'spotify'};
+globalThis.scLogin = 'spotify';
+globalThis.scEnterTries = 0;
+globalThis.scEnterTimer = {start() {}};
+globalThis.Planck = {librarianController: {streamingPlaylistsController: {invalidateUI() {}}}};
+scCall('masterLimiter=1');
+scLoginDone();
+reqs.at(-1).finish(200, {masterLimiter: false, sources: ['spotify'], loggedIn: ['spotify']}, 'login');
+assert.equal(scScope, 'spotify', 'login callback ignored successful GET');
+assert.equal(scMasterLimiter, true, 'login callback GET during write must not revert pending setting');
+""",
+        }.items():
+            with self.subTest(case=case):
+                run_node(script + action)
+
     @unittest.skipUnless(shutil.which("node"), "Node is required")
     def test_rapid_setting_posts_serialize_coalesce_and_rollback_on_error(self):
         main = self.bp.SERVICES_MAIN
@@ -181,6 +272,7 @@ assert.equal(scMasterLimiter, false, 'fresh post-write poll must still reflect e
             extract_function(main, "scFxMsInteger"),
             extract_function(main, "scFxMsApply"),
             extract_function(main, "scApplyQuery", optional=True),
+            extract_function(main, "scSyncPadBrightness", optional=True),
             extract_function(main, "scUiSyncPending", optional=True),
             extract_function(main, "scUiFlush", optional=True),
             extract_function(main, "scCall"),
@@ -206,7 +298,11 @@ class XMLHttpRequest {{
 let scScope = '', scScopePending = 0, scUiPoll = null, scUiPollScope = '', scUiPollAt = 0, scUiDigest = 'd0', scUiAppliedAt = Date.now();
 let scUiWriteGen = 0, scUiPollGen = 0, scUiPending = 0, scUiQueue = [], scUiSending = false, scUiSendingAt = 0, scUiSendToken = 0, scUiSendXhr = null, scUiHadError = false;
 let scTunnelPending = 0, scUiLoaded = true, scIsPlayerBoard = true, scConsoleLineBoard = false, scFourDeckOn = false, scHasMixer = true;
-let scMasterLimiter = false, scAutoGain = false, scSdHighSpeed = false, scLedBrightness = 100, scUpfaderEcho = false;
+let scMasterLimiter = false, scAutoGain = false, scSdHighSpeed = false, scLedBrightness = 100, scLedBrightnessSaved = 100, scUpfaderEcho = false;
+let scPadBrightnessSynced = false;
+let publishedPadBrightness = 1.0;
+const scPadBrightnessProp = {{ translator: {{ get value() {{ return publishedPadBrightness; }}, set value(v) {{ publishedPadBrightness = v; }} }} }};
+globalThis.Planck = {{ getProperty() {{ return scPadBrightnessProp; }} }};
 let scFxTimeMode = 'beats', scFxTimeMs = 500, scFxMsWanted = -1, scSources = [], scLoggedIn = [];
 let transitionSets = 0;
 const scTransitionFxView = {{
@@ -222,26 +318,40 @@ function scApply(v) {{
     if (v.masterLimiter !== undefined) scMasterLimiter = !!v.masterLimiter;
     if (v.autoGain !== undefined) scAutoGain = !!v.autoGain;
     if (v.sdHighSpeed !== undefined) scSdHighSpeed = !!v.sdHighSpeed;
-    if (v.ledBrightness !== undefined) scLedBrightness = parseInt(v.ledBrightness) || 100;
+    if (v.ledBrightness !== undefined) {{
+        const brt = parseInt(v.ledBrightness) || 100;
+        scLedBrightness = brt;
+        scLedBrightnessSaved = brt;
+    }}
     if (v.upfaderEcho !== undefined) scUpfaderEcho = !!v.upfaderEcho;
 }}
 {code}
 // 1. Rapid ListEntry taps: 80 -> 60 -> 40. Only 80 is in flight; 60 coalesces into 40.
+// Optimistic picker moves to 40, while hardware pad brightness waits for confirmed saves (#325).
 scCall('ledBrightness=80');
 scCall('ledBrightness=60');
 scCall('ledBrightness=40');
 assert.equal(scLedBrightness, 40, 'optimistic state tracks latest tap');
+assert.equal(scLedBrightnessSaved, 100, 'confirmed hardware brightness stays at saved level while POST is in flight');
+scSyncPadBrightness();
+assert.equal(publishedPadBrightness, 1.0, 'slow POST must not publish unconfirmed brightness prematurely');
 assert.equal(reqs.length, 1, 'only one setting POST in flight at once');
 assert.ok(reqs[0].url.endsWith('?ledBrightness=80'));
-// When 80 finishes, QML must NOT revert scLedBrightness to 80 and must immediately send 40.
+// When 80 finishes (intermediate queued ACK), picker stays 40, confirmed hardware brightness advances to 80, and 40 sends next.
 reqs[0].finish(200, {{ledBrightness: 80}}, 'd80');
 assert.equal(scLedBrightness, 40, 'intermediate POST reply must not clobber queued tap');
+assert.equal(scLedBrightnessSaved, 80, 'intermediate confirmed ACK updates hardware brightness');
+scSyncPadBrightness();
+assert.equal(publishedPadBrightness, 0.8);
 assert.equal(reqs.length, 2);
 assert.ok(reqs[1].url.endsWith('?ledBrightness=40'), '60 coalesced into 40');
 reqs[1].finish(200, {{ledBrightness: 40}}, 'd40');
 assert.equal(scLedBrightness, 40);
+assert.equal(scLedBrightnessSaved, 40);
+scSyncPadBrightness();
+assert.equal(publishedPadBrightness, 0.4);
 assert.equal(scUiPending, 0);
-assert.ok(scPadDelayRestarts >= 1, '#325 pad brightness delay restarted after POST confirmation');
+assert.ok(scPadDelayRestarts >= 2, '#325 pad brightness delay restarted on both intermediate and final confirmations');
 
 // 2. Rapid distinct switch toggles: Master Soft Clipper ON then Auto-Gain ON.
 scCall('masterLimiter=1');
@@ -324,21 +434,22 @@ class XMLHttpRequest {{
 let scScope = '', scScopePending = 0, scUiPoll = null, scUiPollScope = '', scUiPollAt = 0, scUiDigest = '', scUiAppliedAt = 0;
 let scUiWriteGen = 0, scUiPollGen = 0, scUiPending = 0, scUiQueue = [], scUiSending = false, scUiSendingAt = 0, scUiSendToken = 0, scUiSendXhr = null, scUiHadError = false;
 let scTunnelPending = 0, scUiLoaded = true, scIsPlayerBoard = true, scConsoleLineBoard = false, scFourDeckOn = false, scHasMixer = false, scTransitionFxView = null;
-let scSources = ['tidal', 'netease', 'spotify', 'deezer', 'soundcloud', 'beatport', 'applemusic'];
+let scSources = ['tidal', 'netease', 'spotify', 'deezer', 'soundcloud', 'beatport', 'applemusic', 'rekordbox'];
 function scApply(v) {{ if (v.sources) scSources = v.sources; }}
 {code}
-// User disables SoundCloud, then immediately disables Deezer before POST 1 replies.
+// User disables SoundCloud, then immediately disables Deezer before POST 1 replies, while discovered rekordbox is present.
 scSetSource('soundcloud', false);
 scSetSource('deezer', false);
 assert.equal(scSources.includes('soundcloud'), false, 'soundcloud disabled optimistically');
 assert.equal(scSources.includes('deezer'), false, 'deezer disabled optimistically');
+assert.equal(scSources.includes('rekordbox'), true, 'discovered rekordbox must stay visible optimistically');
 assert.equal(reqs.length, 1, 'second sources POST waits behind first');
 assert.equal(reqs[0].url, 'http://127.0.0.1:8080/v1/enginex/ui?sources=tidal,netease,spotify,deezer,beatport,applemusic');
-reqs[0].finish(200, {{sources: ['tidal', 'netease', 'spotify', 'deezer', 'beatport', 'applemusic']}}, 'ds1');
+reqs[0].finish(200, {{sources: ['tidal', 'netease', 'spotify', 'deezer', 'beatport', 'applemusic', 'rekordbox']}}, 'ds1');
 assert.equal(reqs.length, 2);
-assert.equal(reqs[1].url, 'http://127.0.0.1:8080/v1/enginex/ui?sources=tidal,netease,spotify,beatport,applemusic', 'second POST must NOT re-enable soundcloud');
-reqs[1].finish(200, {{sources: ['tidal', 'netease', 'spotify', 'beatport', 'applemusic']}}, 'ds2');
-assert.deepEqual(scSources, ['tidal', 'netease', 'spotify', 'beatport', 'applemusic']);
+assert.equal(reqs[1].url, 'http://127.0.0.1:8080/v1/enginex/ui?sources=tidal,netease,spotify,beatport,applemusic', 'second POST must NOT re-enable soundcloud or serialize rekordbox');
+reqs[1].finish(200, {{sources: ['tidal', 'netease', 'spotify', 'beatport', 'applemusic', 'rekordbox']}}, 'ds2');
+assert.deepEqual(scSources, ['tidal', 'netease', 'spotify', 'beatport', 'applemusic', 'rekordbox']);
 """
         run_node(script)
 
@@ -375,7 +486,7 @@ class XMLHttpRequest {{
 let scScope = '', scScopePending = 0, scUiPoll = null, scUiPollScope = '', scUiPollAt = 0, scUiDigest = 'd0', scUiAppliedAt = Date.now();
 let scUiWriteGen = 0, scUiPollGen = 0, scUiPending = 0, scUiQueue = [], scUiSending = false, scUiSendingAt = 0, scUiSendToken = 0, scUiSendXhr = null, scUiHadError = false;
 let scRemoteAccess = false, scRemoteAccessStatus = 'stopped', scRemoteAccessUrl = '', scRemoteAccessError = '';
-let scTunnelPending = 0, scTunnelSending = false, scTunnelQueued = null, scTunnelSendingAt = 0, scTunnelSendToken = 0;
+let scTunnelPending = 0, scTunnelSending = false, scTunnelQueued = null, scTunnelSendingAt = 0, scTunnelSendToken = 0, scTunnelSendXhr = null;
 let scUiLoaded = true, scLoggedIn = [], scSources = [];
 const root = {{
     get scRemoteAccess() {{ return scRemoteAccess; }}, set scRemoteAccess(v) {{ scRemoteAccess = v; }},
@@ -408,6 +519,27 @@ assert.equal(reqs[2].body, JSON.stringify({{enabled: false}}));
 reqs[2].finish(200, {{enabled: false, status: 'stopped'}});
 assert.equal(scUiPending, 0);
 assert.equal(scRemoteAccess, false);
+// Complete the post-tunnel resync poll triggered by scTunnelSend.
+const postTunnelPoll = reqs.at(-1);
+assert.equal(postTunnelPoll.method, 'GET');
+postTunnelPoll.finish(200, {{tunnel: {{enabled: false, status: 'stopped'}}}}, 'dt1');
+// Hung tunnel POST (>15s) recovers via 3s scCall('') watchdog without stranding pending count.
+const t0 = Date.now();
+Date.now = () => t0;
+scTunnelToggle(true);
+const hungTunnel = reqs.at(-1);
+assert.equal(scUiPending, 1);
+Date.now = () => t0 + 16000;
+scCall('');
+assert.equal(hungTunnel.aborted, true, 'hung tunnel POST aborted by 3s watchdog');
+assert.equal(scTunnelPending, 0, 'hung tunnel clears pending count');
+assert.equal(scUiPending, 0);
+const reconPoll = reqs.at(-1);
+assert.equal(reconPoll.method, 'GET');
+reconPoll.finish(200, {{tunnel: {{enabled: false, status: 'stopped'}}}}, 'dt2');
+assert.equal(scRemoteAccess, false, 'reconciled poll restores server tunnel state');
+hungTunnel.finish(200, {{enabled: true, status: 'running'}});
+assert.equal(scRemoteAccess, false, 'delayed reply from timed-out tunnel POST must be ignored');
 """
         run_node(script)
 
@@ -437,7 +569,7 @@ class XMLHttpRequest {{
     }}
 }}
 let scBtLayers = ['Master', 'Booth', 'Headphones'], scBtLayer = 'Master';
-const root = {{ scBtGen: 0, scBtSending: false, scBtQueued: '', scBtSendingAt: 0, scBtSendToken: 0 }};
+const root = {{ scBtGen: 0, scBtSending: false, scBtQueued: '', scBtSendingAt: 0, scBtSendToken: 0, scBtReload: false }};
 {code}
 // Dialog opens -> GET in flight. User quickly taps Booth then Headphones.
 scBtLoad();
@@ -455,6 +587,19 @@ assert.equal(reqs.length, 3);
 assert.ok(reqs[2].url.endsWith('assignLayer=Headphones'));
 reqs[2].finish(200, {{layers: ['Master', 'Booth', 'Headphones'], assignLayer: 'Headphones'}});
 assert.equal(scBtLayer, 'Headphones');
+// Reopening Bluetooth dialog during an in-flight assignment defers GET until write completes.
+scBtSet('Booth');
+const write = reqs.at(-1), count = reqs.length;
+scBtLoad();
+const read = reqs.length > count ? reqs.at(-1) : null;
+assert.equal(read, null, 'scBtLoad during scBtSet must defer instead of racing');
+write.finish(200, {{layers: ['Master', 'Booth'], assignLayer: 'Booth'}});
+assert.equal(scBtLayer, 'Booth', 'reopening during write must keep acknowledged assignment');
+assert.equal(reqs.length, count + 1, 'deferred scBtLoad must run once the in-flight assignment finishes');
+assert.equal(reqs.at(-1).method, 'GET');
+reqs.at(-1).finish(200, {{layers: ['Master', 'Booth', 'Zone'], assignLayer: 'Booth'}});
+assert.deepEqual(scBtLayers, ['Master', 'Booth', 'Zone']);
+assert.equal(scBtLayer, 'Booth');
 """
         run_node(script)
 

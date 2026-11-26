@@ -3475,6 +3475,7 @@ SERVICES_MAIN = """
 	property var scTunnelQueued: null
 	property real scTunnelSendingAt: 0
 	property int scTunnelSendToken: 0
+	property var scTunnelSendXhr: null
 	function scTunnelApply(v) {
 		if (!v) return
 		scRemoteAccess = !!v.enabled
@@ -3487,11 +3488,13 @@ SERVICES_MAIN = """
 		scTunnelSendingAt = Date.now()
 		const token = ++scTunnelSendToken
 		const x = new XMLHttpRequest()
+		scTunnelSendXhr = x
 		x.open("POST", "http://127.0.0.1:8080/v1/enginex/tunnel")
 		x.setRequestHeader("Content-Type", "application/json")
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4 || token !== scTunnelSendToken) return
 			scTunnelSending = false
+			scTunnelSendXhr = null
 			if (scTunnelQueued !== null) {
 				const queued = scTunnelQueued
 				scTunnelQueued = null
@@ -3499,6 +3502,7 @@ SERVICES_MAIN = """
 				return
 			}
 			scTunnelPending = 0
+			if (typeof scUiWriteGen !== "undefined") scUiWriteGen++
 			if (typeof scUiSyncPending === "function") scUiSyncPending()
 			let v = null
 			try { v = JSON.parse(x.responseText) } catch (e) {}
@@ -3525,6 +3529,12 @@ SERVICES_MAIN = """
 		if (scTunnelSending && Date.now() - scTunnelSendingAt < 15000) {
 			scTunnelQueued = want
 			return
+		}
+		if (scTunnelSending) {
+			scTunnelSendToken++
+			if (scTunnelSendXhr) { try { scTunnelSendXhr.abort() } catch (e) {} }
+			scTunnelSendXhr = null
+			scTunnelSending = false
 		}
 		scTunnelQueued = null
 		scTunnelSend(want)
@@ -3726,16 +3736,19 @@ SERVICES_MAIN = """
 	// timer), so the pads follow the picker within a fraction of a second, not after its 10 s HTTP poll. The level
 	// is published 200 ms after the last change (restarted by each pick): the hook's 80 ms settings poll must hold
 	// the level before the controller resends the LEDs, or that resend would go out at the old one. 0 = not yet.
+	property int scLedBrightnessSaved: 0
 	property bool scPadBrightnessSynced: false
 	readonly property var scPadBrightnessPropRef: Planck.createProperty("EngineXPadBrightness", 0.0, 0)
 	readonly property var scPadBrightnessProp: scPadBrightnessPropRef && Planck.getProperty("/GUI/Scripted/EngineXPadBrightness")
 	function scSyncPadBrightness() {
 		const p = scPadBrightnessProp && scPadBrightnessProp.translator ? scPadBrightnessProp : Planck.getProperty("/GUI/Scripted/EngineXPadBrightness")
 		if (!p || !p.translator || !scUiLoaded) { scPadBrightnessSynced = false; return }
-		p.translator.value = Math.max(20, Math.min(100, scLedBrightness)) / 100
+		const saved = typeof scLedBrightnessSaved !== "undefined" && scLedBrightnessSaved > 0 ? scLedBrightnessSaved : scLedBrightness
+		p.translator.value = Math.max(20, Math.min(100, saved)) / 100
 		scPadBrightnessSynced = true
 	}
 	onScLedBrightnessChanged: scPadBrightnessDelay.restart()
+	onScLedBrightnessSavedChanged: scPadBrightnessDelay.restart()
 	Timer {
 		id: scPadBrightnessDelay
 		interval: 200; repeat: false
@@ -4270,6 +4283,7 @@ SERVICES_MAIN = """
 	property string scBtQueued: ""
 	property real scBtSendingAt: 0
 	property int scBtSendToken: 0
+	property bool scBtReload: false
 	function scBtLabel(name) { return name === "Master" ? "Main" : name }
 	function scBtLabels(names) { return names.map(scBtLabel) }
 	function scBtReply(x) {
@@ -4279,6 +4293,22 @@ SERVICES_MAIN = """
 		scBtLayer = r.assignLayer || ""
 	}
 	function scBtLoad() {
+		if (root.scBtSending) {
+			if (Date.now() - (root.scBtSendingAt || 0) < 10000) {
+				root.scBtReload = true
+				return
+			}
+			root.scBtSendToken = (root.scBtSendToken || 0) + 1
+			root.scBtSending = false
+			root.scBtGen = (root.scBtGen || 0) + 1
+			if (root.scBtQueued) {
+				const queued = root.scBtQueued
+				root.scBtQueued = ""
+				root.scBtReload = true
+				scBtSend(queued, root.scBtGen || 0)
+				return
+			}
+		}
 		const gen = root.scBtGen || 0
 		const x = new XMLHttpRequest()
 		x.open("GET", "http://127.0.0.1:8080/v1/enginex/bluetooth")
@@ -4305,9 +4335,16 @@ SERVICES_MAIN = """
 				scBtSend(queued, root.scBtGen || 0)
 				return
 			}
+			const reload = !!root.scBtReload
+			root.scBtReload = false
 			if (x.status === 200) {
 				if ((root.scBtGen || 0) === gen) scBtReply(x)
-			} else scBtLoad()
+				root.scBtGen = (root.scBtGen || 0) + 1
+				if (reload) scBtLoad()
+			} else {
+				root.scBtGen = (root.scBtGen || 0) + 1
+				scBtLoad()
+			}
 		}
 		x.send()
 	}
@@ -4324,6 +4361,36 @@ SERVICES_MAIN = """
 	}
 	function scCall(query, done) {
 		if (!query && !done) {
+			if (typeof scUiSending !== "undefined" && scUiSending && Date.now() - scUiSendingAt >= 20000) {
+				scUiSendToken++
+				if (typeof scUiWriteGen !== "undefined") scUiWriteGen++
+				if (scUiSendXhr) { try { scUiSendXhr.abort() } catch (e) {} }
+				scUiSendXhr = null
+				scUiSending = false
+				scUiHadError = true
+				if (typeof scUiQueue !== "undefined" && scUiQueue.length > 0) {
+					scUiFlush()
+				} else {
+					if (typeof scUiSyncPending === "function") scUiSyncPending()
+					scUiDigest = ""
+				}
+			}
+			if (typeof scTunnelSending !== "undefined" && scTunnelSending && Date.now() - scTunnelSendingAt >= 15000) {
+				scTunnelSendToken++
+				if (typeof scUiWriteGen !== "undefined") scUiWriteGen++
+				if (typeof scTunnelSendXhr !== "undefined" && scTunnelSendXhr) { try { scTunnelSendXhr.abort() } catch (e) {} scTunnelSendXhr = null }
+				scTunnelSending = false
+				if (typeof scTunnelQueued !== "undefined" && scTunnelQueued !== null && typeof scTunnelSend === "function") {
+					const queued = scTunnelQueued
+					scTunnelQueued = null
+					scTunnelSend(queued)
+				} else {
+					if (typeof scTunnelPending !== "undefined") scTunnelPending = 0
+					if (typeof scUiSyncPending === "function") scUiSyncPending()
+					scUiDigest = ""
+				}
+			}
+			if (typeof scUiPending !== "undefined" && scUiPending > 0) return
 			if (!scUiPoll) {
 				scUiPoll = new XMLHttpRequest()
 				scUiPoll.onreadystatechange = scUiPollReply
@@ -4358,6 +4425,8 @@ SERVICES_MAIN = """
 		}
 		// An old source reply must not reopen real TIDAL and log out its carrier.
 		const scope = scScopePending ? "" : scScope
+		const readGen = typeof scUiWriteGen !== "undefined" ? scUiWriteGen : 0
+		const startedDuringWrite = typeof scUiPending !== "undefined" && scUiPending > 0
 		if (scopeChange) scScopePending++
 		const x = new XMLHttpRequest()
 		x.open(query ? "POST" : "GET", "http://127.0.0.1:8080/v1/enginex/ui" + (query ? "?" + query : ""))
@@ -4373,8 +4442,27 @@ SERVICES_MAIN = """
 			}
 			const reply = JSON.parse(x.responseText)
 			if (scope !== scScope || scScopePending) delete reply.scope
-			if (!reply.fxSelectorReady && (typeof scUiPending === "undefined" || scUiPending === 0)) {
+			const freshRead = !startedDuringWrite && (typeof scUiPending === "undefined" || scUiPending === 0) && (typeof scUiWriteGen === "undefined" || readGen === scUiWriteGen)
+			if (!reply.fxSelectorReady && freshRead) {
+				const prevScope = scScope
+				const wasLoaded = typeof scUiLoaded !== "undefined" && scUiLoaded
+				const wasIn = wasLoaded && prevScope && prevScope !== "tidal" && typeof scLoggedIn !== "undefined" && Array.isArray(scLoggedIn) ? scLoggedIn.indexOf(prevScope) >= 0 : null
 				scApply(reply)
+				if (typeof scLoginOpen !== "undefined" && scLoginOpen && typeof scLoggedIn !== "undefined" && Array.isArray(scLoggedIn) && scLoggedIn.indexOf(scLoginOpen) >= 0 && typeof scSources !== "undefined" && Array.isArray(scSources) && scSources.indexOf(scLoginOpen) >= 0) {
+					const target = scLoginOpen
+					scLogin = ""
+					scLoginOpen = ""
+					scOpen(target)
+				} else if (!done && wasIn !== null && scScope === prevScope && typeof scLoggedIn !== "undefined" && Array.isArray(scLoggedIn) && (scLoggedIn.indexOf(prevScope) >= 0) !== wasIn) {
+					const nowIn = !wasIn
+					if (nowIn && typeof scLogin !== "undefined" && scLogin === prevScope) scLogin = ""
+					if (typeof Planck !== "undefined" && Planck && Planck.librarianController && Planck.librarianController.streamingPlaylistsController)
+						Planck.librarianController.streamingPlaylistsController.invalidateUI()
+					if (nowIn && typeof scEnterTimer !== "undefined" && scEnterTimer) {
+						scEnterTries = 8
+						scEnterTimer.start()
+					}
+				}
 				if (!scScopePending && typeof x.getResponseHeader === "function") {
 					const dig = x.getResponseHeader("X-UI-Digest") || ""
 					if (dig) { scUiDigest = dig; scUiAppliedAt = Date.now() }
@@ -4482,8 +4570,11 @@ SERVICES_MAIN = """
 			else if (key === "jogInvertLeft") { scReverseJogLeft = on; if (typeof scSyncReverseJog === "function") scSyncReverseJog(true) }
 			else if (key === "jogInvertRight") { scReverseJogRight = on; if (typeof scSyncReverseJog === "function") scSyncReverseJog(true) }
 			else if (key === "sources") {
+				const configurable = ["tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"]
 				const list = val ? val.split(",").filter(Boolean) : []
-				if (!scSameItems(scSources, list)) scSources = list
+				const extras = Array.isArray(scSources) ? scSources.filter(s => configurable.indexOf(s) < 0 && list.indexOf(s) < 0) : []
+				const next = list.concat(extras)
+				if (!scSameItems(scSources, next)) scSources = next
 			}
 			else if (key.indexOf("mixstreamFx") === 0 && key.length === 12) {
 				const idx = parseInt(key.slice(11)) - 1
@@ -4499,9 +4590,11 @@ SERVICES_MAIN = """
 		if (scUiSending) {
 			if (Date.now() - scUiSendingAt < 20000) return
 			scUiSendToken++
+			scUiWriteGen++
 			if (scUiSendXhr) { try { scUiSendXhr.abort() } catch (e) {} }
 			scUiSendXhr = null
 			scUiSending = false
+			scUiHadError = true
 		}
 		if (!scUiQueue.length) { scUiSyncPending(); return }
 		const item = scUiQueue.shift()
@@ -4522,6 +4615,7 @@ SERVICES_MAIN = """
 				scUiHadError = true
 				if (scUiQueue.length > 0) { scUiFlush(); return }
 				scUiHadError = false
+				scUiWriteGen++
 				scUiSyncPending()
 				scUiDigest = ""
 				scCall("")
@@ -4529,6 +4623,14 @@ SERVICES_MAIN = """
 			}
 			const reply = JSON.parse(x.responseText)
 			if (scope !== scScope || scScopePending) delete reply.scope
+			if (reply.ledBrightness !== undefined && typeof scLedBrightnessSaved !== "undefined") {
+				const confirmedBrt = parseInt(reply.ledBrightness) || 100
+				if (scLedBrightnessSaved !== confirmedBrt) {
+					scLedBrightnessSaved = confirmedBrt
+					if (typeof scPadBrightnessDelay !== "undefined" && scPadBrightnessDelay)
+						scPadBrightnessDelay.restart()
+				}
+			}
 			if (scUiQueue.length > 0) {
 				if (item.done) item.done(reply)
 				scUiFlush()
@@ -4537,14 +4639,31 @@ SERVICES_MAIN = """
 			scUiHadError = false
 			scUiSyncPending()
 			if (!reply.fxSelectorReady && scUiPending === 0 && gen === scUiWriteGen) {
+				scUiWriteGen++
+				const prevScope = scScope
+				const wasLoaded = typeof scUiLoaded !== "undefined" && scUiLoaded
+				const wasIn = wasLoaded && prevScope && prevScope !== "tidal" && typeof scLoggedIn !== "undefined" && Array.isArray(scLoggedIn) ? scLoggedIn.indexOf(prevScope) >= 0 : null
 				scApply(reply)
-				if (typeof x.getResponseHeader === "function") {
+				if (typeof scLoginOpen !== "undefined" && scLoginOpen && typeof scLoggedIn !== "undefined" && Array.isArray(scLoggedIn) && scLoggedIn.indexOf(scLoginOpen) >= 0 && typeof scSources !== "undefined" && Array.isArray(scSources) && scSources.indexOf(scLoginOpen) >= 0) {
+					const target = scLoginOpen
+					scLogin = ""
+					scLoginOpen = ""
+					scOpen(target)
+				} else if (wasIn !== null && scScope === prevScope && typeof scLoggedIn !== "undefined" && Array.isArray(scLoggedIn) && (scLoggedIn.indexOf(prevScope) >= 0) !== wasIn) {
+					const nowIn = !wasIn
+					if (nowIn && typeof scLogin !== "undefined" && scLogin === prevScope) scLogin = ""
+					if (typeof Planck !== "undefined" && Planck && Planck.librarianController && Planck.librarianController.streamingPlaylistsController)
+						Planck.librarianController.streamingPlaylistsController.invalidateUI()
+					if (nowIn && typeof scEnterTimer !== "undefined" && scEnterTimer) {
+						scEnterTries = 8
+						scEnterTimer.start()
+					}
+				}
+				if (!scScopePending && typeof x.getResponseHeader === "function") {
 					const dig = x.getResponseHeader("X-UI-Digest") || ""
 					if (dig) { scUiDigest = dig; scUiAppliedAt = Date.now() }
 				}
 			}
-			if (item.query.indexOf("ledBrightness=") >= 0 && typeof scPadBrightnessDelay !== "undefined" && scPadBrightnessDelay)
-				scPadBrightnessDelay.restart()
 			if (item.done) item.done(reply)
 		}
 		x.send()
@@ -4560,15 +4679,15 @@ SERVICES_MAIN = """
 		const wasLoaded = typeof scUiLoaded !== "undefined" && scUiLoaded
 		const wasIn = wasLoaded && prevScope && prevScope !== "tidal" && Array.isArray(scLoggedIn) ? scLoggedIn.indexOf(prevScope) >= 0 : null
 		scApply(JSON.parse(scUiPoll.responseText))
-		scUiDigest = digest; scUiAppliedAt = now
-		if (typeof scLoginOpen !== "undefined" && scLoginOpen && Array.isArray(scLoggedIn) && scLoggedIn.indexOf(scLoginOpen) >= 0 && typeof scSources !== "undefined" && Array.isArray(scSources) && scSources.indexOf(scLoginOpen) >= 0) {
+		if (typeof scLoginOpen !== "undefined" && scLoginOpen && typeof scLoggedIn !== "undefined" && Array.isArray(scLoggedIn) && scLoggedIn.indexOf(scLoginOpen) >= 0 && typeof scSources !== "undefined" && Array.isArray(scSources) && scSources.indexOf(scLoginOpen) >= 0) {
 			const target = scLoginOpen
 			scLogin = ""
 			scLoginOpen = ""
 			scOpen(target)
+			if (!scScopePending) { scUiDigest = digest; scUiAppliedAt = now }
 			return
 		}
-		if (wasIn !== null && scScope === prevScope && Array.isArray(scLoggedIn) && (scLoggedIn.indexOf(prevScope) >= 0) !== wasIn) {
+		if (wasIn !== null && scScope === prevScope && typeof scLoggedIn !== "undefined" && Array.isArray(scLoggedIn) && (scLoggedIn.indexOf(prevScope) >= 0) !== wasIn) {
 			const nowIn = !wasIn
 			if (nowIn && typeof scLogin !== "undefined" && scLogin === prevScope) scLogin = ""
 			if (typeof Planck !== "undefined" && Planck && Planck.librarianController && Planck.librarianController.streamingPlaylistsController)
@@ -4578,6 +4697,7 @@ SERVICES_MAIN = """
 				scEnterTimer.start()
 			}
 		}
+		scUiDigest = digest; scUiAppliedAt = now
 	}
 	function scApply(v) {
 		scUsbPreparing = !!v.usbPreparing
@@ -4659,8 +4779,8 @@ SERVICES_MAIN = """
 			else if (v.sd_high_speed !== undefined) scSdHighSpeed = v.sd_high_speed === "1" || v.sd_high_speed === 1 || v.sd_high_speed === true
 			scSdHighSpeedPending = !!v.sdHighSpeedPending
 			if (typeof scSyncReverseJog === "function") scSyncReverseJog(true)
-			if (v.ledBrightness !== undefined) scLedBrightness = parseInt(v.ledBrightness) || 100
-			else if (v.led_brightness !== undefined) scLedBrightness = parseInt(v.led_brightness) || 100
+			if (v.ledBrightness !== undefined) { const brt = parseInt(v.ledBrightness) || 100; scLedBrightness = brt; if (typeof scLedBrightnessSaved !== "undefined") scLedBrightnessSaved = brt }
+			else if (v.led_brightness !== undefined) { const brt = parseInt(v.led_brightness) || 100; scLedBrightness = brt; if (typeof scLedBrightnessSaved !== "undefined") scLedBrightnessSaved = brt }
 			if (v.uiScale !== undefined) scUIScale = parseInt(v.uiScale) || 100
 			else if (v.ui_scale !== undefined) scUIScale = parseInt(v.ui_scale) || 100
 			if (v.stemsEqMode !== undefined) scStemsEqMode = !!v.stemsEqMode
@@ -4766,7 +4886,7 @@ SERVICES_MAIN = """
 			else if (key === "jog_invert_right") root.scReverseJogRight = val === "1" || val === "true"
 			else if (key === "sd_high_speed") root.scSdHighSpeed = val === "1" || val === "true"
 			else if (key === "hifi_output") root.scHifiOutput = root.scIsPlayerBoard && (val === "1" || val === "true")
-			else if (key === "led_brightness") root.scLedBrightness = parseInt(val) || 100
+			else if (key === "led_brightness") { const brt = parseInt(val) || 100; root.scLedBrightness = brt; if (typeof root.scLedBrightnessSaved !== "undefined") root.scLedBrightnessSaved = brt }
 			else if (key === "ui_scale") root.scUIScale = parseInt(val) || 100
 			else if (key === "stems_eq_mode") root.scStemsEqMode = val === "1"
 			else if (key === "beat_jump_pads") root.scBeatJumpPads = val === "1"
@@ -4825,10 +4945,12 @@ SERVICES_MAIN = """
 	}
 	function scSetSource(id, on) {
 		if (!scUiLoaded) return
-		const list = scSources.filter(s => s !== id)
-		if (on) list.push(id)
-		scSources = list
-		scCall("sources=" + list.join(","))
+		const configurable = ["tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"]
+		const saved = scSources.filter(s => configurable.indexOf(s) >= 0 && s !== id)
+		if (on && configurable.indexOf(id) >= 0) saved.push(id)
+		const extras = scSources.filter(s => configurable.indexOf(s) < 0)
+		scSources = saved.concat(extras)
+		scCall("sources=" + saved.join(","))
 	}
 	// Every service is backed by Engine's TIDAL provider; the gateway follows the scope.
 @TIDAL_OPEN@
@@ -4882,8 +5004,11 @@ SERVICES_MAIN = """
 		const target = root.scLoginOpen
 		scLogin = ""
 		root.scLoginOpen = ""
-		scCall("", function() {
-			if (target && scSources.indexOf(target) >= 0 && scLoggedIn.indexOf(target) >= 0) {
+		scCall("", function(reply) {
+			const sources = reply && Array.isArray(reply.sources) ? reply.sources : scSources
+			const loggedIn = reply && Array.isArray(reply.loggedIn) ? reply.loggedIn : scLoggedIn
+			if (reply && Array.isArray(reply.loggedIn) && (typeof scSameItems !== "function" || !scSameItems(scLoggedIn, reply.loggedIn))) scLoggedIn = reply.loggedIn
+			if (target && sources.indexOf(target) >= 0 && loggedIn.indexOf(target) >= 0) {
 				scOpen(target)
 				return
 			}

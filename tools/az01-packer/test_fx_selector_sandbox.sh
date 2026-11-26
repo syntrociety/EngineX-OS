@@ -95,11 +95,12 @@ Item {
 QML
 fi
 printf 'lang=en\npioneer_fx=spiral\n' > "$R/data/enginex/ui/settings.conf"
-chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile > "$W/dbus.log" 2>&1 || true
+dbus_pid=$(chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile --print-pid=1 3>&- 4>&- 9>&- 2>"$W/dbus.log" || true)
+dbus_pid=${dbus_pid%%[!0-9]*}
 if [ "${FX_READY_READONLY:-0}" = 1 ]; then mount -o remount,ro "$R/run"; fi
 "$W/ui-server" "$R/data/enginex/ui" "$R/tmp/fx-state" > "$W/http.log" 2>&1 &
 server=$!
-trap 'kill "$server" 2>/dev/null || true' EXIT
+trap 'kill "$server" 2>/dev/null || true; [ -n "$dbus_pid" ] && kill "$dbus_pid" 2>/dev/null || true' EXIT
 preload=/etc/enginex/libengine-ui-hook.so:/tmp/libfx-native-test.so
 if [ "${FX_CONFIG_ONLY:-0}" = 1 ]; then preload=/etc/enginex/libengine-ui-hook.so; fi
 set +e

@@ -141,13 +141,16 @@ func (s *Server) broadcastPost(w http.ResponseWriter, r *http.Request) {
 	defer s.uiMu.Unlock()
 
 	cfg := s.loadBroadcastConfig()
+	enabledExplicit := false
 
 	// 1. Handle query parameter ?enabled=1|0 or true|false, lanMode, lanTarget
 	if q := r.URL.Query().Get("enabled"); q != "" {
 		if q == "1" || strings.EqualFold(q, "true") {
 			cfg.Enabled = true
+			enabledExplicit = true
 		} else if q == "0" || strings.EqualFold(q, "false") {
 			cfg.Enabled = false
+			enabledExplicit = true
 		}
 	}
 	if q := r.URL.Query().Get("lanMode"); q != "" {
@@ -175,6 +178,7 @@ func (s *Server) broadcastPost(w http.ResponseWriter, r *http.Request) {
 
 			if in.Enabled != nil {
 				cfg.Enabled = *in.Enabled
+				enabledExplicit = true
 			}
 			if in.ServerURL != nil {
 				newHost := broadcastHost(*in.ServerURL)
@@ -211,6 +215,9 @@ func (s *Server) broadcastPost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if r.Context().Err() != nil {
+		return
+	}
 	// Validate first: a rejected config must not be persisted and reloaded at next boot.
 	if err := b.Configure(cfg); err != nil {
 		fail(w, 400, err)
@@ -223,6 +230,9 @@ func (s *Server) broadcastPost(w http.ResponseWriter, r *http.Request) {
 	if err := providers.SaveJSON(s.broadcastConfigPath(), saved); err != nil {
 		fail(w, 500, errors.New("could not save broadcast settings"))
 		return
+	}
+	if enabledExplicit {
+		s.broadcastGen++
 	}
 	respond(w, b.Status())
 }

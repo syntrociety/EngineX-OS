@@ -911,6 +911,109 @@ exit 0
                         finally:
                             subprocess.run(["kill", "-9", str(dummy_pid)], capture_output=True)
 
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_newer_unchanged_poll_confirmed_revocation(self):
+        run_node(self._round2_js_harness() + """
+const revoked = {sources: ['spotify'], loggedIn: []};
+scCall(''); reqs.at(-1).finish(revoked, 'revoked');
+scLoginOpen = scLogin = 'spotify';
+scLoginDone(); const oldQR = reqs.at(-1);
+scCall(''); reqs.at(-1).finish(revoked, 'revoked');
+oldQR.finish({sources: ['spotify'], loggedIn: ['spotify']}, 'previous-login');
+assert.deepEqual(scLoggedIn, [], 'cached-digest poll confirmed no Spotify login');
+assert.notEqual(scScope, 'spotify');
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_newer_signed_out_choice(self):
+        for label, base in (("504", self.bp.TIDAL_OPEN_504), ("530", self.bp.TIDAL_OPEN_530)):
+            with self.subTest(base=label):
+                open_source = extract_function(base, "scOpen")
+                run_node(self._round2_js_harness() + open_source + """
+function scLoginBegin(id) { scLogin = id; }
+scSources = ['spotify', 'deezer']; scLoggedIn = [];
+scLoginOpen = scLogin = 'spotify';
+scLoginDone(); const oldQR = reqs.at(-1);
+scOpen('deezer');
+assert.equal(scLoginOpen, 'deezer');
+oldQR.finish({sources: scSources, loggedIn: ['spotify']}, 'old-login');
+assert.equal(scLoginOpen, 'deezer', 'older QR abandoned the newer sign-in choice');
+assert.ok(!reqs.some(r => r.url.includes('scope=spotify')));
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_invalid_ack_recovers_without_another_tap(self):
+        run_node(self._round2_js_harness() + """
+// 1. Empty HTTP 200 on single queued POST releases scUiPending and reconciles via GET.
+scCall('masterLimiter=1');
+const old = reqs.at(-1);
+Object.assign(old, {readyState: 4, status: 200, responseText: ''});
+old.onreadystatechange();
+assert.equal(scUiPending, 0, 'empty HTTP 200 must clear pending state immediately');
+assert.equal(reqs.at(-1).method, 'GET');
+reqs.at(-1).finish({masterLimiter: false}, 'reconciled');
+
+// 2. Malformed/non-object HTTP 200 while another setting is queued flushes the next item.
+scCall('masterLimiter=1');
+const badFirst = reqs.at(-1);
+scCall('autoGain=1');
+Object.assign(badFirst, {readyState: 4, status: 200, responseText: '[]'});
+badFirst.onreadystatechange();
+const second = reqs.at(-1);
+assert.equal(second.method, 'POST');
+assert.ok(second.url.includes('autoGain=1'));
+second.finish({masterLimiter: false, autoGain: true}, 'after-second');
+assert.equal(scUiPending, 0);
+
+// 3. Malformed HTTP 200 on Bluetooth POST triggers scBtLoad reconciliation without throwing.
+scBtSet('Headphones');
+const badBt = reqs.at(-1);
+Object.assign(badBt, {readyState: 4, status: 200, responseText: 'null'});
+badBt.onreadystatechange();
+assert.equal(scBtSending, false);
+assert.equal(reqs.at(-1).method, 'GET');
+assert.ok(reqs.at(-1).url.endsWith('/v1/enginex/bluetooth'));
+reqs.at(-1).finish({layers: ['Master', 'Headphones'], assignLayer: 'Master'});
+assert.equal(scBtLayer, 'Master');
+
+// 4. Malformed HTTP 200 on Tunnel POST clears pending and reconciles via GET.
+scTunnelToggle(true);
+const badTun = reqs.at(-1);
+Object.assign(badTun, {readyState: 4, status: 200, responseText: '[]'});
+badTun.onreadystatechange();
+assert.equal(scTunnelPending, 0);
+assert.equal(scUiPending, 0);
+assert.equal(reqs.at(-1).method, 'GET');
+reqs.at(-1).finish({tunnel: {enabled: false, status: 'stopped'}}, 'tun-reconciled');
+assert.equal(scRemoteAccess, false);
+
+// 5. Malformed HTTP 200 on periodic poll ignores the body without throwing.
+now += 60000;
+scCall('');
+const badPoll = reqs.at(-1);
+Object.assign(badPoll, {readyState: 4, status: 200, responseText: '{truncated'});
+badPoll.onreadystatechange();
+assert.equal(scUiPending, 0);
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_reselect_same_logged_in_source_beats_old_qr(self):
+        for label, base in (("504", self.bp.TIDAL_OPEN_504), ("530", self.bp.TIDAL_OPEN_530)):
+            with self.subTest(base=label):
+                run_node(self._round2_js_harness() + extract_function(base, "scOpen") + """
+function scSelectTidal() { return true; }
+function scTidalProvider() { return {name: 'TIDAL', loggedIn: true}; }
+function scGatewayLogin() {}
+scTidalLoggedIn = false; scTidalSynthetic = false; scTidalLoginPending = false;
+scScope = 'deezer'; scSources = ['spotify', 'deezer']; scLoggedIn = ['deezer'];
+scLoginOpen = scLogin = 'spotify';
+scLoginDone(); const oldQR = reqs.at(-1);
+scOpen('deezer');
+reqs.at(-1).finish({scope: 'deezer', sources: scSources, loggedIn: ['spotify', 'deezer']}, 'current-deezer');
+oldQR.finish({scope: 'deezer', sources: scSources, loggedIn: ['spotify', 'deezer']}, 'prior-spotify');
+assert.equal(scScope, 'deezer', 'reselecting the current provider is still a newer explicit choice');
+""")
+
 
 if __name__ == "__main__":
     unittest.main()

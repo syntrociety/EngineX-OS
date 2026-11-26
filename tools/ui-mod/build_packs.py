@@ -475,6 +475,7 @@ TIDAL_OPEN_530 = """	function scTidalProvider() {
 		if (!id || !scUiLoaded || scSources.indexOf(id) < 0) return
 		if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) {
 			if (id !== "rekordbox") {
+				if (typeof root !== "undefined" && root) root.scChoiceGen = (root.scChoiceGen || 0) + 1
 				root.scLoginOpen = id
 				scLoginBegin(id)
 			}
@@ -509,6 +510,7 @@ TIDAL_OPEN_504 = """
 		if (!id || !scUiLoaded || scSources.indexOf(id) < 0) return
 		if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) {
 			if (id !== "rekordbox") {
+				if (typeof root !== "undefined" && root) root.scChoiceGen = (root.scChoiceGen || 0) + 1
 				root.scLoginOpen = id
 				scLoginBegin(id)
 			}
@@ -3522,7 +3524,10 @@ SERVICES_MAIN = """
 			if (typeof root !== "undefined" && root && root.scScopeNeedRefresh && typeof scUiPending !== "undefined" && scUiPending === 0 && !scScopePending)
 				root.scScopeNeedRefresh = false
 			let v = null
-			try { v = JSON.parse(x.responseText) } catch (e) {}
+			try {
+				const parsed = JSON.parse(x.responseText)
+				if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) v = parsed
+			} catch (e) {}
 			if (x.status === 200 && v) {
 				root.scTunnelApply(v)
 				scUiDigest = ""
@@ -4306,10 +4311,16 @@ SERVICES_MAIN = """
 	function scBtLabel(name) { return name === "Master" ? "Main" : name }
 	function scBtLabels(names) { return names.map(scBtLabel) }
 	function scBtReply(x) {
-		if (x.readyState !== 4 || x.status !== 200) return
-		const r = JSON.parse(x.responseText)
+		if (x.readyState !== 4 || x.status !== 200) return false
+		let r = null
+		try {
+			const parsed = JSON.parse(x.responseText)
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) r = parsed
+		} catch (e) {}
+		if (!r) return false
 		scBtLayers = r.layers || []
 		scBtLayer = r.assignLayer || ""
+		return true
 	}
 	function scBtLoad() {
 		if (root.scBtSending) {
@@ -4371,9 +4382,9 @@ SERVICES_MAIN = """
 			const reload = !!root.scBtReload
 			root.scBtReload = false
 			if (x.status === 200) {
-				if ((root.scBtGen || 0) === gen) scBtReply(x)
+				const ok = (root.scBtGen || 0) !== gen || scBtReply(x)
 				root.scBtGen = (root.scBtGen || 0) + 1
-				if (reload) scBtLoad()
+				if (reload || !ok) scBtLoad()
 			} else {
 				root.scBtGen = (root.scBtGen || 0) + 1
 				scBtLoad()
@@ -4509,7 +4520,14 @@ SERVICES_MAIN = """
 			if (x.readyState !== 4 || settled) return
 			settled = true
 			if (scopeChange) scScopePending--
-			if (x.status !== 200) {
+			let reply = null
+			if (x.status === 200) {
+				try {
+					const parsed = JSON.parse(x.responseText)
+					if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) reply = parsed
+				} catch (e) {}
+			}
+			if (x.status !== 200 || !reply) {
 				if (scopeChange) {
 					if (scope !== scScope) scOpen(scScope)
 					else {
@@ -4523,7 +4541,6 @@ SERVICES_MAIN = """
 				}
 				return
 			}
-			const reply = JSON.parse(x.responseText)
 			const scopeStripped = scope !== scScope || scScopePending > 0
 			if (scopeStripped) delete reply.scope
 			const freshForCallback = (typeof scUiWriteGen === "undefined" || readGen === scUiWriteGen) && (!_r || reqStartSeq >= (_r.scUiAppliedStartSeq || 0))
@@ -4718,7 +4735,14 @@ SERVICES_MAIN = """
 			if (x.readyState !== 4 || token !== scUiSendToken) return
 			scUiSending = false
 			scUiSendXhr = null
-			if (x.status !== 200) {
+			let reply = null
+			if (x.status === 200) {
+				try {
+					const parsed = JSON.parse(x.responseText)
+					if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) reply = parsed
+				} catch (e) {}
+			}
+			if (x.status !== 200 || !reply) {
 				scUiHadError = true
 				if (scUiQueue.length > 0) { scUiFlush(); return }
 				scUiHadError = false
@@ -4729,7 +4753,6 @@ SERVICES_MAIN = """
 				scCall("")
 				return
 			}
-			const reply = JSON.parse(x.responseText)
 			const scopeStripped = scope !== scScope || scScopePending > 0
 			if (scopeStripped) delete reply.scope
 			if (reply.ledBrightness !== undefined && typeof scLedBrightnessSaved !== "undefined") {
@@ -4796,13 +4819,22 @@ SERVICES_MAIN = """
 		// Unchanged settings (stream-sync's digest): skip the parse and the writes,
 		// but re-apply every 30 s in case a local change raced a reply.
 		const digest = scUiPoll.getResponseHeader("X-UI-Digest") || "", now = Date.now()
-		if (digest && digest === scUiDigest && now - scUiAppliedAt < 30000) { scEnsureTidal(); return }
+		if (digest && digest === scUiDigest && now - scUiAppliedAt < 30000) {
+			if (_rp && pollStartSeq > (_rp.scUiAppliedStartSeq || 0)) _rp.scUiAppliedStartSeq = pollStartSeq
+			scEnsureTidal(); return
+		}
+		let reply = null
+		try {
+			const parsed = JSON.parse(scUiPoll.responseText)
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) reply = parsed
+		} catch (e) {}
+		if (!reply) return
 		const prevScope = scScope
 		const wasLoaded = typeof scUiLoaded !== "undefined" && scUiLoaded
 		const wasIn = wasLoaded && prevScope && prevScope !== "tidal" && Array.isArray(scLoggedIn) ? scLoggedIn.indexOf(prevScope) >= 0 : null
 		if (_rp && pollStartSeq > (_rp.scUiAppliedStartSeq || 0)) _rp.scUiAppliedStartSeq = pollStartSeq
 		if (typeof scUiAppliedSeq !== "undefined") scUiAppliedSeq++
-		scApply(JSON.parse(scUiPoll.responseText))
+		scApply(reply)
 		if (typeof scLoginOpen !== "undefined" && scLoginOpen && typeof scLoggedIn !== "undefined" && Array.isArray(scLoggedIn) && scLoggedIn.indexOf(scLoginOpen) >= 0 && typeof scSources !== "undefined" && Array.isArray(scSources) && scSources.indexOf(scLoginOpen) >= 0) {
 			const target = scLoginOpen
 			scLogin = ""
@@ -5113,7 +5145,14 @@ SERVICES_MAIN = """
 		x.open(method, "http://127.0.0.1:8080/v1/enginex/login?provider=" + id)
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4 || scLogin !== id) return
-			if (x.status === 200) done(JSON.parse(x.responseText))
+			let reply = null
+			if (x.status === 200) {
+				try {
+					const parsed = JSON.parse(x.responseText)
+					if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) reply = parsed
+				} catch (e) {}
+			}
+			if (reply) done(reply)
 			else scLoginStatus = "error"
 		}
 		x.send()

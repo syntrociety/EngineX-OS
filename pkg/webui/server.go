@@ -122,12 +122,14 @@ type Server struct {
 	rbxPresenceMu sync.Mutex
 	rbxPresence   map[string]*rbxPresence
 
-	uiWriteSeq     writeSeqTracker
-	btWriteSeq     writeSeqTracker
-	sdHighSpeedGen uint64
-	broadcastGen   uint64
-	tunnelWriteMu  sync.Mutex
-	tunnelWriteSeq writeSeqTracker
+	uiWriteSeq          writeSeqTracker
+	btWriteSeq          writeSeqTracker
+	sdHighSpeedGen      uint64
+	sdHighSpeedInFlight bool
+	sdHighSpeedBase     bool
+	broadcastGen        uint64
+	tunnelWriteMu       sync.Mutex
+	tunnelWriteSeq      writeSeqTracker
 
 	prolinkExport *prolink.Exporter
 	closed        chan struct{}

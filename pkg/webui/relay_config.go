@@ -409,12 +409,15 @@ func (s *Server) updateRelayConfig(relay, password *string) error {
 	return s.updateRelayConfigLocked(relay, password)
 }
 
-// updateRelayConfigLocked needs s.uiMu. Moving the relay to another host drops
+// saveRelayConfigLocked needs s.uiMu. Moving the relay to another host drops
 // the saved password unless a new one comes with it: it was never meant for
-// that host (#8).
-func (s *Server) updateRelayConfigLocked(relay, password *string) error {
+// that host (#8). It defers kickRelayRefresh so callers committing multiple
+// files can restore the prior file if a later write fails.
+func (s *Server) saveRelayConfigLocked(relay, password *string) (oldURL, newURL string, restore func(), err error) {
+	path := s.relayConfigPath()
+	prevData, prevExisted, prevReadable := snapshotOptionalFile(path)
 	v := s.loadRelayConfig()
-	old := v.RelayURL
+	oldURL = v.RelayURL
 	if relay != nil {
 		if relayHost(*relay) != relayHost(v.RelayURL) {
 			v.Password = ""
@@ -424,10 +427,23 @@ func (s *Server) updateRelayConfigLocked(relay, password *string) error {
 	if password != nil {
 		v.Password = *password
 	}
-	if err := providers.SaveJSON(s.relayConfigPath(), v); err != nil {
+	if err = providers.SaveJSON(path, v); err != nil {
+		return oldURL, v.RelayURL, nil, err
+	}
+	return oldURL, v.RelayURL, func() {
+		_ = restoreOptionalFile(path, prevData, prevExisted, prevReadable, 0o600)
+	}, nil
+}
+
+// updateRelayConfigLocked needs s.uiMu. Moving the relay to another host drops
+// the saved password unless a new one comes with it: it was never meant for
+// that host (#8).
+func (s *Server) updateRelayConfigLocked(relay, password *string) error {
+	oldURL, newURL, _, err := s.saveRelayConfigLocked(relay, password)
+	if err != nil {
 		return err
 	}
-	s.kickRelayRefresh(old, v.RelayURL)
+	s.kickRelayRefresh(oldURL, newURL)
 	return nil
 }
 

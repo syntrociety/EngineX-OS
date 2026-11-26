@@ -401,6 +401,63 @@ func writeUIScaleEnv(pct int) error {
 	return os.Rename(tmp.Name(), uiScaleEnvPath)
 }
 
+func snapshotOptionalFile(path string) (data []byte, existed, readable bool) {
+	b, err := os.ReadFile(path)
+	if err == nil {
+		return b, true, true
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, true
+	}
+	return nil, false, false
+}
+
+func restoreOptionalFile(path string, data []byte, existed, readable bool, mode os.FileMode) error {
+	if !readable {
+		return nil
+	}
+	if !existed {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".restore-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err = tmp.Write(data); err == nil {
+		err = tmp.Sync()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(tmp.Name(), mode)
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
+func snapshotUIScaleEnv() ([]byte, bool, bool) {
+	uiScaleMu.Lock()
+	defer uiScaleMu.Unlock()
+	return snapshotOptionalFile(uiScaleEnvPath)
+}
+
+func restoreUIScaleEnv(data []byte, existed, readable bool) {
+	uiScaleMu.Lock()
+	defer uiScaleMu.Unlock()
+	_ = restoreOptionalFile(uiScaleEnvPath, data, existed, readable, 0o644)
+}
+
 func (s *Server) uiDir() string {
 	if s.cfg.UIDir != "" {
 		return s.cfg.UIDir
@@ -847,10 +904,15 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if err != nil {
 		return err
 	}
-	if err = os.Rename(tmp.Name(), path); err != nil {
+	prevScaleData, prevScaleExisted, prevScaleReadable := snapshotUIScaleEnv()
+	if err = writeUIScaleEnv(v.UIScale); err != nil {
 		return err
 	}
-	return writeUIScaleEnv(v.UIScale)
+	if err = os.Rename(tmp.Name(), path); err != nil {
+		restoreUIScaleEnv(prevScaleData, prevScaleExisted, prevScaleReadable)
+		return err
+	}
+	return nil
 }
 
 // Caller holds uiMu. Preserve unrelated/unknown settings during migration.
@@ -1191,9 +1253,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v := s.loadUI()
-	prevShadowMode := v.ShadowMode
-	prevConsoleHTTPS := v.ConsoleHTTPS
-	prevSdHighSpeed := v.SdHighSpeed
+	prevUI := v
 	bad := func(field, val string, allowed []string) bool {
 		return q.Has(field) && !slices.Contains(allowed, val)
 	}
@@ -1655,8 +1715,15 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		s.uiMu.Unlock()
 		return
 	}
+	var (
+		hasRelay     bool
+		oldRelayURL  string
+		newRelayURL  string
+		restoreRelay func()
+	)
 	// Relay settings are written only once every field is known to be valid (#9).
 	if q.Has("relayUrl") || q.Has("deemixPassword") {
+		hasRelay = true
 		var relay, password *string
 		if q.Has("relayUrl") {
 			relay = ptrTo(q.Get("relayUrl"))
@@ -1664,39 +1731,59 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		if q.Has("deemixPassword") {
 			password = ptrTo(q.Get("deemixPassword"))
 		}
-		if err := s.updateRelayConfigLocked(relay, password); err != nil {
+		var rerr error
+		oldRelayURL, newRelayURL, restoreRelay, rerr = s.saveRelayConfigLocked(relay, password)
+		if rerr != nil {
 			s.uiMu.Unlock()
 			fail(w, 500, errors.New("could not save the relay settings"))
 			return
 		}
 	}
-	previousVerbose := s.loadUI().VerboseLog
+	verboseWritten := false
 	if q.Has("verboseLog") {
-		if err := writeVerboseLog(v.VerboseLog); err != nil {
+		if verr := writeVerboseLog(v.VerboseLog); verr != nil {
+			if restoreRelay != nil {
+				restoreRelay()
+			}
 			s.uiMu.Unlock()
 			fail(w, 500, errors.New("could not save logging configuration"))
 			return
 		}
+		verboseWritten = true
 	}
 	if slices.Contains(uiServices, v.Scope) && !slices.Contains(v.Sources, v.Scope) {
 		v.Scope = ""
 	}
 	err := s.saveUI(v, q.Has("prolinkShare"))
-	if err != nil && q.Has("verboseLog") {
-		_ = writeVerboseLog(previousVerbose)
-	}
-	if err == nil && v.ConsoleHTTPS != prevConsoleHTTPS {
+	if err == nil && v.ConsoleHTTPS != prevUI.ConsoleHTTPS {
 		if herr := s.applyHTTPS(v.ConsoleHTTPS); herr != nil {
-			v.ConsoleHTTPS = prevConsoleHTTPS
-			_ = s.saveUI(v)
+			_ = s.saveUI(prevUI)
 			err = herr
 		}
 	}
-	needSD := err == nil && v.SdHighSpeed != prevSdHighSpeed && boardCapabilities(imagePrefix(deviceCompatible())).SDHighSpeed
+	if err != nil {
+		if verboseWritten {
+			_ = writeVerboseLog(prevUI.VerboseLog)
+		}
+		if restoreRelay != nil {
+			restoreRelay()
+		}
+	} else if hasRelay {
+		s.kickRelayRefresh(oldRelayURL, newRelayURL)
+	}
+	hasSD := q.Has("sdHighSpeed") || q.Has("sd_high_speed")
+	sdSupported := boardCapabilities(imagePrefix(deviceCompatible())).SDHighSpeed
+	needSD := err == nil && sdSupported && (v.SdHighSpeed != prevUI.SdHighSpeed || (hasSD && s.sdHighSpeedInFlight))
 	var mySDGen, myBroadcastGen uint64
+	var sdRollbackVal bool
 	if needSD {
+		if !s.sdHighSpeedInFlight {
+			s.sdHighSpeedBase = prevUI.SdHighSpeed
+			s.sdHighSpeedInFlight = true
+		}
 		s.sdHighSpeedGen++
 		mySDGen = s.sdHighSpeedGen
+		sdRollbackVal = s.sdHighSpeedBase
 	}
 	if err == nil && hasBroadcast {
 		s.broadcastGen++
@@ -1714,16 +1801,22 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		if _, serr := s.applySDHighSpeed(v.SdHighSpeed); serr != nil {
 			s.uiMu.Lock()
 			if s.sdHighSpeedGen == mySDGen {
+				s.sdHighSpeedInFlight = false
 				cur := s.loadUI()
-				cur.SdHighSpeed = prevSdHighSpeed
+				cur.SdHighSpeed = sdRollbackVal
 				_ = s.saveUI(cur)
 			}
 			s.uiMu.Unlock()
 			fail(w, 500, serr)
 			return
 		}
+		s.uiMu.Lock()
+		if s.sdHighSpeedGen == mySDGen {
+			s.sdHighSpeedInFlight = false
+		}
+		s.uiMu.Unlock()
 	}
-	if v.ShadowMode != prevShadowMode {
+	if v.ShadowMode != prevUI.ShadowMode {
 		// Shadow Deck Mode switches live (#201): answer the held shadow long poll
 		// now, in the new mode, instead of after its wait.
 		s.shadow.mu.Lock()

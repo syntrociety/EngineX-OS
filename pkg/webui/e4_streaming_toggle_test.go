@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -402,5 +403,216 @@ func TestR3CancelledVerboseWriteRemainsConsistent(t *testing.T) {
 	_, err := os.Stat(verboseLogPath)
 	if s.loadUI().VerboseLog != (err == nil) {
 		t.Fatal("logging.ini is enabled while the persisted UI setting is off")
+	}
+}
+
+func reviewE4Post(s *Server, ctx context.Context, query string, seq ...string) int {
+	req := httptest.NewRequest(http.MethodPost, "/v1/enginex/ui?"+query, nil).WithContext(ctx)
+	req.RemoteAddr = (&net.TCPAddr{IP: net.IPv6loopback, Port: 1}).String()
+	if len(seq) != 0 {
+		req.Header.Set("X-UI-Client-Id", "review-r4")
+		req.Header.Set("X-UI-Write-Seq", seq[0])
+	}
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	return w.Code
+}
+
+// TestReviewE4SideFiles verifies that storage errors before or after the settings.conf
+// rename never leave side files (logging.ini, deemix-config.json, ui-scale.env) split
+// from settings.conf.
+func TestReviewE4SideFiles(t *testing.T) {
+	t.Run("failure after settings rename", func(t *testing.T) {
+		s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+		defer s.Close()
+		oldLog, oldScale := verboseLogPath, uiScaleEnvPath
+		defer func() { verboseLogPath, uiScaleEnvPath = oldLog, oldScale }()
+		verboseLogPath = filepath.Join(t.TempDir(), "logging.ini")
+		uiScaleEnvPath = t.TempDir()
+		if err := os.WriteFile(filepath.Join(uiScaleEnvPath, "keep"), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if code := reviewE4Post(s, context.Background(), "verboseLog=1"); code != 500 {
+			t.Fatalf("fixture returned %d, expected persistence failure", code)
+		}
+		_, err := os.Stat(verboseLogPath)
+		if configured := s.loadUI().VerboseLog; configured != (err == nil) {
+			t.Fatalf("after HTTP 500 settings.conf verbose=%v, logging.ini present=%v", configured, err == nil)
+		}
+	})
+	t.Run("relay before failed settings rename", func(t *testing.T) {
+		s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+		defer s.Close()
+		oldScale := uiScaleEnvPath
+		defer func() { uiScaleEnvPath = oldScale }()
+		uiScaleEnvPath = filepath.Join(t.TempDir(), "ui-scale.env")
+		relay := httptest.NewServer(http.NotFoundHandler())
+		defer relay.Close()
+		before := s.loadRelayConfig().RelayURL
+		if err := os.Mkdir(filepath.Join(s.uiDir(), "settings.conf"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if code := reviewE4Post(s, context.Background(), "ledBrightness=60&uiScale=110&relayUrl="+relay.URL); code != 500 {
+			t.Fatalf("fixture returned %d, expected persistence failure", code)
+		}
+		if s.loadRelayConfig().RelayURL != before {
+			t.Fatalf("after HTTP 500 relay changed, brightness=%d", s.loadUI().LedBrightness)
+		}
+		if _, err := os.Stat(uiScaleEnvPath); !os.IsNotExist(err) {
+			t.Fatalf("after failed settings rename ui-scale.env remained present: %v", err)
+		}
+	})
+}
+
+// TestReviewE4DelayedSD verifies repeat SD high-speed intent, web console broadcast
+// toggles (JSON and query forms), direct broadcast setter, cancelled restart, and
+// newer SD generations while an older SD helper is still paused.
+func TestReviewE4DelayedSD(t *testing.T) {
+	asDeck(t, "inmusic,jp07")
+	modes := []string{
+		"same SD intent",
+		"console broadcast",
+		"console broadcast query",
+		"console broadcast metadata",
+		"setter broadcast",
+		"cancelled restart",
+		"new SD generation",
+	}
+	for _, mode := range modes {
+		t.Run(mode, func(t *testing.T) {
+			entered, release := make(chan struct{}), make(chan struct{})
+			restarts := 0
+			s := New(Config{
+				AccessToken: t.Name(), UIDir: t.TempDir(), StateDir: t.TempDir(), SDHighSpeedRunDir: t.TempDir(),
+				ApplySDHighSpeed: func(enabled, playing bool) (bool, error) {
+					if !enabled {
+						return false, nil
+					}
+					select {
+					case <-entered:
+						return false, nil
+					default:
+						close(entered)
+					}
+					select {
+					case <-release:
+					case <-time.After(3 * time.Second):
+						return false, errors.New("fixture helper timed out")
+					}
+					if mode == "same SD intent" || mode == "new SD generation" {
+						return false, errors.New("fixture SD failure")
+					}
+					return false, nil
+				},
+				RestartEngine: func() error { restarts++; return nil },
+			}, nil)
+			defer s.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			first := "sdHighSpeed=1"
+			if mode == "console broadcast" || mode == "console broadcast query" || mode == "setter broadcast" {
+				if err := s.SetBroadcastEnabled(true); err != nil {
+					t.Fatal(err)
+				}
+				first += "&broadcast=1"
+			}
+			if mode == "console broadcast metadata" {
+				first += "&broadcast=1"
+			}
+			if mode == "cancelled restart" {
+				first += "&restart=1"
+			}
+			done := make(chan int, 1)
+			go func() { done <- reviewE4Post(s, ctx, first, "1") }()
+			select {
+			case <-entered:
+			case <-time.After(3 * time.Second):
+				close(release)
+				t.Fatal("helper did not start")
+			}
+			code := 200
+			switch mode {
+			case "same SD intent":
+				code = reviewE4Post(s, context.Background(), "sdHighSpeed=1", "2")
+			case "new SD generation":
+				code = reviewE4Post(s, context.Background(), "sdHighSpeed=0", "2")
+				if code == 200 {
+					code = reviewE4Post(s, context.Background(), "sdHighSpeed=1", "3")
+				}
+			case "console broadcast":
+				w := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodPost, "/api/broadcast", strings.NewReader(`{"enabled":false}`))
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Authorization", "Bearer "+s.cfg.AccessToken)
+				s.ServeHTTP(w, req)
+				if w.Code == 200 && s.BroadcastEnabled() {
+					close(release)
+					<-done
+					t.Fatal("console did not turn broadcast off")
+				}
+				code = w.Code
+			case "console broadcast query":
+				w := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodPost, "/api/broadcast?enabled=0", nil)
+				req.Header.Set("Authorization", "Bearer "+s.cfg.AccessToken)
+				s.ServeHTTP(w, req)
+				if w.Code == 200 && s.BroadcastEnabled() {
+					close(release)
+					<-done
+					t.Fatal("console query did not turn broadcast off")
+				}
+				code = w.Code
+			case "console broadcast metadata":
+				w := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodPost, "/api/broadcast", strings.NewReader(`{"streamName":"Live Set"}`))
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Authorization", "Bearer "+s.cfg.AccessToken)
+				s.ServeHTTP(w, req)
+				code = w.Code
+				if code == 200 {
+					w2 := httptest.NewRecorder()
+					req2 := httptest.NewRequest(http.MethodPost, "/api/broadcast/metadata", strings.NewReader(`{"artist":"A","title":"B"}`))
+					req2.Header.Set("Content-Type", "application/json")
+					req2.Header.Set("Authorization", "Bearer "+s.cfg.AccessToken)
+					s.ServeHTTP(w2, req2)
+					code = w2.Code
+				}
+			case "setter broadcast":
+				if err := s.SetBroadcastEnabled(false); err != nil {
+					code = 500
+				}
+			case "cancelled restart":
+				cancel()
+			}
+			close(release)
+			oldCode := <-done
+			if mode == "same SD intent" && (code == 409 || code == 500) && oldCode == 500 {
+				return
+			}
+			if code != 200 {
+				t.Fatalf("new request returned %d", code)
+			}
+			if mode == "same SD intent" || mode == "new SD generation" {
+				if oldCode != 500 {
+					t.Fatalf("fixture failure returned %d", oldCode)
+				}
+				if !s.loadUI().SdHighSpeed {
+					t.Fatal("200 for newer SD=on, then old failure restored off")
+				}
+			} else {
+				if oldCode != 200 {
+					t.Fatalf("fixture success returned %d", oldCode)
+				}
+				if (mode == "console broadcast" || mode == "console broadcast query" || mode == "setter broadcast") && s.BroadcastEnabled() {
+					t.Fatal("newer broadcast off was acknowledged, then old helper enabled it")
+				}
+				if mode == "console broadcast metadata" && !s.BroadcastEnabled() {
+					t.Fatal("metadata-only broadcast request suppressed pending broadcast=1")
+				}
+				if mode == "cancelled restart" && restarts != 0 {
+					t.Fatalf("late engine restarts=%d", restarts)
+				}
+			}
+		})
 	}
 }

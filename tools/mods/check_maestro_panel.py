@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from PyQt5.QtGui import QGuiApplication
-from PyQt5.QtQml import QQmlExpression, qmlContext
+from PyQt5.QtQml import QQmlEngine, QQmlExpression
 from PyQt5.QtQuick import QQuickView
 from PyQt5.QtCore import QUrl
 
@@ -50,7 +50,7 @@ def check_panel(tmp):
         view.show()
         root = view.rootObject()
         def js(code):
-            expr = QQmlExpression(qmlContext(root), root, code)
+            expr = QQmlExpression(QQmlEngine.contextForObject(root), root, code)
             result, unused = expr.evaluate()
             if expr.hasError():
                 raise RuntimeError(expr.error().toString())
@@ -62,7 +62,7 @@ def check_panel(tmp):
                 if js(code):
                     return
                 time.sleep(.015)
-            raise RuntimeError("Timeout: " + code + " / " + str(js("root.message")))
+            raise RuntimeError("Timeout: " + code + " / " + str(js("JSON.stringify([root.message,root.actionError,root.state.maestro])")))
         wait_for("root.helperOnline && root.state.maestro.valid")
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as rx:
             rx.bind(("127.0.0.1", 0))

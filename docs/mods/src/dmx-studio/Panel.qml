@@ -76,7 +76,7 @@ Rectangle {
     ColumnLayout {
         anchors.fill: parent; anchors.margins: 14; spacing: 8
         Label { text: "DMX STUDIO · Independent lighting console"; color: "white"; font.pixelSize: 24 }
-        Label { text: root.actionError || root.message; color: root.state.running ? "#54f0b1" : "#f8ca76"; wrapMode: Text.Wrap; Layout.fillWidth: true }
+        Label { visible: tabs.currentIndex !== 0 || !!root.actionError; text: root.actionError || root.message; color: root.state.running ? "#54f0b1" : "#f8ca76"; wrapMode: Text.Wrap; Layout.fillWidth: true }
         RowLayout {
             visible: tabs.currentIndex !== 0
             Button { text: "Apply controls / show"; enabled: root.initialized; onClicked: root.apply() }

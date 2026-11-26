@@ -3,6 +3,8 @@ package dmxstudio
 import (
 	"bytes"
 	"net"
+	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -97,5 +99,35 @@ func TestMixerRunningStatus(t *testing.T) {
 	}
 	if len(values) != 3 || values[0] != [3]int{16, 0, 64} || values[1] != [3]int{16, 1, 127} || values[2] != [3]int{16, 5, 12} {
 		t.Fatalf("CCs: %v", values)
+	}
+}
+
+func TestMixerReadsChannelFadersUntilDisconnect(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "midi-in")
+	if err := syscall.Mkfifo(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := syscall.Open(path, syscall.O_RDWR|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := maestroSettings{Device: path, Channel: 16, LocalCC: 0, PeerCC: 1, Cross: "local-X", CrossCC: 5}
+	var input mixerInput
+	input.reset()
+	defer input.close()
+	now := time.Now()
+	input.poll(cfg, now)
+	if _, err = syscall.Write(writer, []byte{0xb0, 0, 42, 0xbf, 0, 127, 1, 64, 5, 0}); err != nil {
+		syscall.Close(writer)
+		t.Fatal(err)
+	}
+	input.poll(cfg, now)
+	syscall.Close(writer)
+	if !input.ready(cfg) || input.local != 127 || input.peer != 64 || input.cross != 0 || input.last != "CH 16 · CC 5 · 0" {
+		t.Fatalf("received %+v", input)
+	}
+	input.poll(cfg, now)
+	if input.ready(cfg) || input.open || input.peer != -1 {
+		t.Fatal("stale fader positions after disconnect")
 	}
 }

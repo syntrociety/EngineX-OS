@@ -59,13 +59,13 @@ Rectangle {
             Label { text: "MaestroDMX"; color: desk.accent; font.pixelSize: 24; font.bold: true }
             Item { Layout.fillWidth: true }
             Label { text: !desk.available ? "Helper offline" : desk.status.armed ? "● OSC actief" : "○ OSC uit"; color: "white" }
-            Button { text: desk.settingUp ? "Terug" : "Uitgang & MIDI"; enabled: desk.available; onClicked: { if (desk.settingUp) desk.settingUp=false; else desk.openSettings() } }
+            Button { text: desk.settingUp ? "Terug" : "Uitgang && MIDI"; enabled: desk.available; onClicked: { if (desk.settingUp) desk.settingUp=false; else desk.openSettings() } }
         }
         TabBar {
             id: views; visible: !desk.settingUp; Layout.fillWidth: true
             TabButton { text: "Showregie" }
             TabButton { text: "Deckmix" }
-            TabButton { text: "Tags & shows" }
+            TabButton { text: "Tags && shows" }
         }
         StackLayout {
             Layout.fillWidth: true; Layout.fillHeight: true
@@ -128,6 +128,7 @@ Rectangle {
                     delegate: ItemDelegate {
                         width: parent ? parent.width : 0
                         text: "[licht:"+modelData+"]   →   "+desk.cfg.shows[modelData]
+                        contentItem: Label { text: parent.text; color: "white"; elide: Text.ElideRight; verticalAlignment: Text.AlignVCenter }
                         onClicked: { desk.editingTag=modelData; tagInput.text=modelData; showInput.text=desk.cfg.shows[modelData]; formError.text="" }
                     }
                 }

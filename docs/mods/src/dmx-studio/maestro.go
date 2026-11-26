@@ -75,6 +75,7 @@ func newMaestro(state string) (*maestro, error) {
 	m := &maestro{cfg: maestroSettings{Port: 7672, Phrase: 32, Channel: 16, PeerCC: 1, CrossCC: 5, Shows: map[string]string{}}}
 	m.midi.reset()
 	saved := m.cfg
+	saved.Shows = map[string]string{}
 	err := modkit.LoadJSON(filepath.Join(state, "maestro.json"), &saved)
 	if err == nil {
 		err = saved.validate()

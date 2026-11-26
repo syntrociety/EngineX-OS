@@ -7970,16 +7970,16 @@ class StemsHqHintAndInstallerTest(unittest.TestCase):
         online_prefix = "High-quality stems:"
         basic_hint = "For high-quality stems, that computer needs the htdemucs model."
         on_deck = "On-deck stems (basic quality): %1 only offers hpss, which is not used."
-        for lang in ("zh-Hans", "zh-Hant"):
+        for lang in ("zh-Hans", "zh-Hant", "es"):
             self.assertIn("%1", rows[on_deck][lang])
             self.assertIn("hpss", rows[on_deck][lang])
-        self.assertIn("htdemucs", rows[basic_hint]["zh-Hans"])
+            self.assertIn("htdemucs", rows[basic_hint][lang])
+            self.assertIn("EngineX Stems", rows[offline_en][lang])
         self.assertIn(offline_en, rows)
         self.assertIn(online_prefix, rows)
-        self.assertIn("EngineX Stems", rows[offline_en]["zh-Hans"])
-        self.assertIn("EngineX Stems", rows[offline_en]["zh-Hant"])
         self.assertEqual(rows[online_prefix]["zh-Hans"], "高音质分轨：")
         self.assertEqual(rows[online_prefix]["zh-Hant"], "高音質分軌：")
+        self.assertEqual(rows[online_prefix]["es"], "Stems de alta calidad:")
         self.assertIn('LibraryTabContent.qml"].append', SRC)
         self.assertIn("root.scLanStemsLine(root.scLanStemsInfo, root.scLang)", SRC)
         fn = re.search(r"function scLanStemsLine\([^)]*\)\s*\{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
@@ -8007,6 +8007,10 @@ scLang = 'zh-Hant';
 assert.equal(scLanStemsLine(null, scLang), rows[{json.dumps(offline_en)}]['zh-Hant']);
 assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'htdemucs'}}, scLang), '高音質分軌：studio-mac (htdemucs)');
 assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'hpss'}}, scLang), '本機分軌（基礎音質）：studio-mac 只提供 hpss，不會使用。如需高音質分軌，該電腦需要安裝 htdemucs 模型。');
+scLang = 'es';
+assert.equal(scLanStemsLine(null, scLang), rows[{json.dumps(offline_en)}]['es']);
+assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'htdemucs'}}, scLang), 'Stems de alta calidad: studio-mac (htdemucs)');
+assert.equal(scLanStemsLine({{online: true, endpoint: 'http://192.168.1.9:17890'}}, scLang), 'Stems en el deck (calidad básica): http://192.168.1.9:17890 solo ofrece hpss, que no se utiliza. Para stems de alta calidad, ese ordenador necesita el modelo htdemucs.');
 // #238 review: a relay that only offers hpss plus a home computer with the neural model.
 // The deck is told about the renderer the track goes to (pkg/webui
 // TestStemsStatusShowsTheRendererInUse): the computer, and only the relay when it is alone.
@@ -8016,11 +8020,75 @@ for (const [lang, used, notUsed] of [
     ['en', 'High-quality stems: studio-pc (htdemucs)', 'On-deck stems (basic quality): relay-box only offers hpss, which is not used. For high-quality stems, that computer needs the htdemucs model.'],
     ['zh-Hans', '高音质分轨：studio-pc (htdemucs)', '本机分轨（基础音质）：relay-box 只提供 hpss，不会使用。如需高音质分轨，该电脑需要安装 htdemucs 模型。'],
     ['zh-Hant', '高音質分軌：studio-pc (htdemucs)', '本機分軌（基礎音質）：relay-box 只提供 hpss，不會使用。如需高音質分軌，該電腦需要安裝 htdemucs 模型。'],
+    ['es', 'Stems de alta calidad: studio-pc (htdemucs)', 'Stems en el deck (calidad básica): relay-box solo ofrece hpss, que no se utiliza. Para stems de alta calidad, ese ordenador necesita el modelo htdemucs.'],
 ]) {{
     scLang = lang;
     assert.equal(scLanStemsLine(computer, lang), used);
     assert.equal(scLanStemsLine(relayOnly, lang), notUsed);
 }}
+"""
+        r = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_web_console_stems_status_matches_issue238_across_four_languages(self):
+        html = (REPO / "pkg/webui/index.html").read_text(encoding="utf-8")
+        t_start = html.index("const T={")
+        t_end = html.index("\n};\n", t_start) + 4
+        t_table = html[t_start:t_end]
+        t_fn = re.search(r"function t\(k,\.\.\.a\)\{[^\n]+\}", html).group(0)
+        stems_fn = re.search(r"function stemsLine\([^\n]+\}", html)
+        self.assertIsNotNone(stems_fn, "pkg/webui/index.html must define stemsLine() for #238 Stems status")
+        show_relay = re.search(r"async function showRelay\(\)\{[^\n]+\}", html).group(0)
+        script = f"""
+const assert = require('assert');
+{t_table}
+const LANGS = ['en', 'zh-Hans', 'zh-Hant', 'es'];
+let lang = 'en';
+{t_fn}
+{stems_fn.group(0)}
+let lastUI = {{capabilities: {{remoteStems: true}}}};
+let relayResp = {{}};
+const els = {{relayUrl: {{value: ''}}, relayState: {{textContent: ''}}}};
+const $ = id => els[id];
+const setVal = (id, x) => {{ els[id].value = x; }};
+async function api() {{ return relayResp; }}
+{show_relay}
+(async () => {{
+  for (const [l, hq, hpss, off, deck] of [
+    ['en', 'High-quality stems: studio-pc (htdemucs)', 'On-deck stems (basic quality): relay-box only offers hpss, which is not used (needs htdemucs)', 'On-deck stems (basic quality); studio-pc offline (use htdemucs on a LAN PC for high quality)', 'On-deck stems (basic quality); run EngineX Stems (htdemucs) on a LAN PC for high quality'],
+    ['zh-Hans', '高音质分轨：studio-pc（htdemucs）', '本机分轨（基础音质）：relay-box 只提供 hpss，不会使用（需 htdemucs）', '本机分轨（基础音质）；studio-pc 离线（局域网电脑运行 htdemucs 可获高音质）', '本机分轨（基础音质）；如需高音质请在局域网电脑运行 EngineX Stems（htdemucs）'],
+    ['zh-Hant', '高音質分軌：studio-pc（htdemucs）', '本機分軌（基礎音質）：relay-box 只提供 hpss，不會使用（需 htdemucs）', '本機分軌（基礎音質）；studio-pc 離線（區域網路電腦執行 htdemucs 可獲高音質）', '本機分軌（基礎音質）；如需高音質請在區域網路電腦執行 EngineX Stems（htdemucs）'],
+    ['es', 'Stems de alta calidad: studio-pc (htdemucs)', 'Stems en el deck (calidad básica): relay-box solo ofrece hpss, que no se utiliza (necesita htdemucs)', 'Stems en el deck (calidad básica); studio-pc desconectado (usa htdemucs en un PC de la red para alta calidad)', 'Stems en el deck (calidad básica); ejecuta EngineX Stems (htdemucs) en un PC de la red para alta calidad'],
+  ]) {{
+    lang = l;
+    lastUI = {{capabilities: {{remoteStems: true}}}};
+    relayResp = {{relayUrl: '', deemixPasswordSet: false, lanStems: {{online: true, hostname: 'studio-pc', backend: 'htdemucs'}}}};
+    await showRelay();
+    assert.equal(els.relayState.textContent, t('pwUnset') + ' · ' + hq);
+
+    relayResp = {{relayUrl: '', deemixPasswordSet: true, lanStems: {{online: true, hostname: 'relay-box', backend: 'hpss', relay: true}}}};
+    await showRelay();
+    assert.equal(els.relayState.textContent, t('pwSet') + ' · ' + hpss);
+
+    relayResp = {{relayUrl: '', deemixPasswordSet: false, lanStems: {{online: false, hostname: 'studio-pc', backend: 'htdemucs'}}}};
+    await showRelay();
+    assert.equal(els.relayState.textContent, t('pwUnset') + ' · ' + off);
+
+    relayResp = {{relayUrl: '', deemixPasswordSet: false, lanStems: null}};
+    await showRelay();
+    assert.equal(els.relayState.textContent, t('pwUnset') + ' · ' + deck);
+  }}
+  lang = 'en';
+  // Endpoint fallback when hostname is absent, unnamed backend treated as hpss, and $& preserved verbatim.
+  assert.equal(stemsLine({{online: true, endpoint: 'http://192.168.1.9:17890', backend: 'htdemucs'}}, true), 'High-quality stems: http://192.168.1.9:17890 (htdemucs)');
+  assert.equal(stemsLine({{online: true, endpoint: 'http://192.168.1.9:17890'}}, true), 'On-deck stems (basic quality): http://192.168.1.9:17890 only offers hpss, which is not used (needs htdemucs)');
+  assert.ok(stemsLine({{online: true, hostname: 'a$&b', backend: 'hpss'}}, true).includes('a$&b only offers hpss'));
+  // AZ04 units use stock neural Stems and omit EngineX basic-quality/LAN Stems status.
+  lastUI = {{capabilities: {{remoteStems: false}}}};
+  relayResp = {{relayUrl: '', deemixPasswordSet: false, lanStems: null}};
+  await showRelay();
+  assert.equal(els.relayState.textContent, t('pwUnset'));
+}})().catch(e => {{ console.error(e); process.exit(1); }});
 """
         r = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)

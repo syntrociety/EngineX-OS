@@ -28,7 +28,7 @@ jobs:
           with tempfile.TemporaryDirectory() as tmp:
               files = b.package_files(mod, b.build_helpers(Path(tmp)))
           manifest = __import__("json").loads(files["mod.json"])
-          manifest.update(version="1.3.0-maestro.1", official=False, author="syntrociety / EngineX DMX Studio contributors", homepage="https://github.com/syntrociety/EngineX-OS", description="Automatic tag-based MaestroDMX OSC shows, deck clock and Xone MIDI faders.")
+          manifest.update(version="1.3.0-maestro.2", official=False, author="syntrociety / EngineX DMX Studio contributors", homepage="https://github.com/syntrociety/EngineX-OS", description="Automatic tag-based MaestroDMX OSC shows, deck clock and Xone MIDI faders.")
           files["mod.json"] = b.json_bytes(manifest)
           b.validate(files)
           Path("dmx-studio-maestro.tar.gz").write_bytes(b.archive(files))

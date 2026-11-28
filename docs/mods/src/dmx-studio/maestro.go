@@ -1,5 +1,5 @@
 // Maestro is an optional control output. The controller continues to render DMX
-// and analyse audio. Only a change of mapped show produces a network command.
+// and analyse audio. Only a change of selected show produces a network command.
 package dmxstudio
 
 import (
@@ -30,7 +30,24 @@ type maestroSettings struct {
 }
 
 var tagKey = regexp.MustCompile("^[a-z0-9][a-z0-9_-]{0,31}$")
+var showIDTag = regexp.MustCompile("^[0-9a-f]{32}$")
 var midiDevice = regexp.MustCompile("^/dev/snd/midiC[0-9]+D[0-9]+$")
+
+type maestroShow struct {
+	address string
+	target  string
+}
+
+func (c maestroSettings) showForTag(tag string) maestroShow {
+	if name := c.Shows[tag]; name != "" {
+		return maestroShow{"/show/name", name}
+	}
+	if showIDTag.MatchString(tag) {
+		id := tag[:8] + "-" + tag[8:12] + "-" + tag[12:16] + "-" + tag[16:20] + "-" + tag[20:]
+		return maestroShow{"/show", id}
+	}
+	return maestroShow{}
+}
 
 func (c maestroSettings) validate() error {
 	ip := net.ParseIP(c.Host)
@@ -64,7 +81,8 @@ type maestro struct {
 	socket                           *net.UDPConn
 	decks                            []deckSnapshot
 	seen                             time.Time
-	source, track, next, last, fault string
+	source, track, fault             string
+	next, last                       maestroShow
 	bpm, beats, position             float64
 	boundary                         int
 	midi                             mixerInput
@@ -97,12 +115,12 @@ func (m *maestro) stop() {
 		m.socket = nil
 	}
 	m.clearClock()
-	m.last = ""
+	m.last = maestroShow{}
 }
 func (m *maestro) clearClock() {
 	m.source = ""
 	m.track = ""
-	m.next = ""
+	m.next = maestroShow{}
 	m.beats = 0
 }
 func (m *maestro) action(action string, req map[string]any, state string) error {
@@ -152,7 +170,7 @@ func (m *maestro) action(action string, req map[string]any, state string) error 
 		}
 		m.socket = conn
 		m.clearClock()
-		m.last = ""
+		m.last = maestroShow{}
 		m.fault = ""
 	default:
 		return modkit.Bad("Onbekende Maestro-actie")
@@ -236,9 +254,9 @@ func (m *maestro) observe(decks []deckSnapshot, now time.Time) {
 	m.bpm = d.effectiveBPM()
 	m.position = d.PositionMS
 	m.seen = now
-	m.next = ""
+	m.next = maestroShow{}
 	if d.TrackKey != "" {
-		m.next = m.cfg.Shows[d.LightTag]
+		m.next = m.cfg.showForTag(d.LightTag)
 	}
 }
 func oscString(packet []byte, s string) []byte {
@@ -285,14 +303,14 @@ func (m *maestro) tick(now time.Time) {
 	previous := m.boundary
 	m.boundary = idx
 	show, socket := m.next, m.socket
-	if idx != previous+1 || show == "" || show == m.last {
+	if idx != previous+1 || show.target == "" || show == m.last {
 		m.mu.Unlock()
 		return
 	}
 	m.mu.Unlock()
 	// A bounded pair of writes, never retried. UDP cannot confirm playback.
 	var err error
-	for _, packet := range [][]byte{oscMessage("/show/name", show), oscMessage("/show/play")} {
+	for _, packet := range [][]byte{oscMessage(show.address, show.target), oscMessage("/show/play")} {
 		if err = socket.SetWriteDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
 			break
 		}
@@ -344,9 +362,9 @@ func (m *maestro) status() map[string]any {
 	if valid {
 		source = m.source
 		if m.socket != nil && m.next != m.last {
-			next = m.next
+			next = m.next.target
 		}
 	}
 	return map[string]any{"config": m.cfg, "armed": m.socket != nil, "decks": decks, "source": source, "bpm": m.bpm,
-		"beat": int(math.Floor(math.Mod(beat, float64(m.cfg.Phrase)))) + 1, "valid": valid, "next": next, "sent": m.last, "error": m.fault, "midi": m.midi.status(m.cfg)}
+		"beat": int(math.Floor(math.Mod(beat, float64(m.cfg.Phrase)))) + 1, "valid": valid, "next": next, "sent": m.last.target, "error": m.fault, "midi": m.midi.status(m.cfg)}
 }

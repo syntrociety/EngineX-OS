@@ -145,6 +145,12 @@ request is shown as sent. UDP does not confirm the active show. Timing of a full
 show load depends on the controller firmware. Audio and fixture control stay
 on Maestro. Closing the panel leaves the helper running. Restart disarms OSC.
 
+Lightstage Viewer can assign a Maestro show to a Lexicon track. It saves the
+show's 32-character UUID in the track's `[licht:…]` comment marker. Sync the
+track comment to Engine DJ and export the track library to the deck. The mod
+sends `/show` with the UUID at the same phrase boundary. An explicit mapping
+in **Tags & shows** takes precedence.
+
 The clock extension in this fork supplies track identity and the tag read from
 the source volume's Engine database, read-only. Both players need the matching
 gateway for peer tags. The lightweight local-clock mode also needs the matching

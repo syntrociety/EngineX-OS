@@ -9,6 +9,22 @@ import (
 	"time"
 )
 
+func TestMaestroShowIDTag(t *testing.T) {
+	const tag = "3c8ff84c026e4e44a9e1869fa9ae35d7"
+	cfg := maestroSettings{Shows: map[string]string{}}
+	want := maestroShow{"/show", "3c8ff84c-026e-4e44-a9e1-869fa9ae35d7"}
+	if got := cfg.showForTag(tag); got != want {
+		t.Fatalf("show = %#v, want %#v", got, want)
+	}
+	cfg.Shows[tag] = "Explicit"
+	if got := cfg.showForTag(tag); got != (maestroShow{"/show/name", "Explicit"}) {
+		t.Fatalf("mapping was ignored: %#v", got)
+	}
+	if got := cfg.showForTag("unmapped"); got != (maestroShow{}) {
+		t.Fatalf("unexpected show: %#v", got)
+	}
+}
+
 func TestMaestroLiveClockToOSC(t *testing.T) {
 	rx, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
